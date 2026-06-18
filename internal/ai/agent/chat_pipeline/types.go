@@ -13,4 +13,5 @@ type UserMessage struct {
 	DurableMemory  string            `json:"durable_memory"`
 	ToolResults    string            `json:"tool_results"`
 	KnowledgeMode  KnowledgeMode     `json:"knowledge_mode"`
+	ModelContext   *ModelContext     `json:"-"`
 }

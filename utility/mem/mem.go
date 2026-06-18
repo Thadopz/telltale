@@ -1,6 +1,7 @@
 package mem
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/gogf/gf/v2/frame/g"
 )
 
 const (
@@ -16,6 +18,7 @@ const (
 	defaultContextMaxMessage = 8
 	defaultContextMaxChars   = 12000
 	defaultSummaryMaxChars   = 4000
+	defaultMemoryIdleTTL     = 24 * time.Hour
 )
 
 var SimpleMemoryMap = make(map[string]*SimpleMemory)
@@ -47,6 +50,8 @@ func GetSimpleMemory(id string) *SimpleMemory {
 func GetConversationMemory(userID string, conversationID string) *SimpleMemory {
 	mu.Lock()
 	defer mu.Unlock()
+
+	pruneStaleMemoriesLocked(time.Now(), defaultMemoryIdleTTL)
 
 	scope := normalizeMemoryScope(userID, conversationID)
 	if mem, ok := SimpleMemoryMap[scope.StorageID]; ok {
@@ -273,10 +278,50 @@ func (c *SimpleMemory) persistLocked(msg *schema.Message) {
 		UpdatedAt:     c.UpdatedAt,
 	}
 	if appender, ok := c.store.(appendMemoryStore); ok && msg != nil {
-		_ = appender.Append(snapshot, msg)
+		if err := appender.Append(snapshot, msg); err != nil {
+			logMemoryPersistError(c, msg, err)
+		}
 		return
 	}
-	_ = c.store.Save(snapshot)
+	if err := c.store.Save(snapshot); err != nil {
+		logMemoryPersistError(c, msg, err)
+	}
+}
+
+func logMemoryPersistError(memory *SimpleMemory, msg *schema.Message, err error) {
+	role := ""
+	if msg != nil {
+		role = string(msg.Role)
+	}
+	g.Log().Warningf(context.Background(), "memory persist failed conversation_id=%s user_id=%s role=%s err=%v", memory.ID, memory.UserID, role, err)
+}
+
+func PruneStaleMemories(now time.Time, maxIdle time.Duration) int {
+	mu.Lock()
+	defer mu.Unlock()
+	return pruneStaleMemoriesLocked(now, maxIdle)
+}
+
+func pruneStaleMemoriesLocked(now time.Time, maxIdle time.Duration) int {
+	if maxIdle <= 0 || now.IsZero() {
+		return 0
+	}
+	removed := 0
+	for id, memory := range SimpleMemoryMap {
+		if memory == nil {
+			delete(SimpleMemoryMap, id)
+			removed++
+			continue
+		}
+		memory.mu.Lock()
+		stale := !memory.UpdatedAt.IsZero() && now.Sub(memory.UpdatedAt) > maxIdle
+		memory.mu.Unlock()
+		if stale {
+			delete(SimpleMemoryMap, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 func normalizeScopeID(value string, fallback string) string {

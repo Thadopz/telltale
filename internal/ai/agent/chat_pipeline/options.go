@@ -30,7 +30,6 @@ type ChatAgentOptions struct {
 	Tools        []tool.BaseTool
 	SkipRerank   bool
 	OnRetrieval  func(RetrievalObservation)
-	ContextNow   func() string
 	DocumentMax  int
 	DocumentsMax int
 	ReactMaxStep int

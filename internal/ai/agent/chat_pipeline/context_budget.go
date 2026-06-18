@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	MaxPromptContextChars = 24000
 	HistoryMaxChars       = 8000
 	DocumentsMaxChars     = 8000
 	SummaryMaxChars       = 3000

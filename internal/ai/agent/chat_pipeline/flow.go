@@ -2,20 +2,18 @@ package chat_pipeline
 
 import (
 	"SREagent/internal/ai/tools"
+	"SREagent/internal/authz"
 	"context"
+	"strings"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 )
 
-func newReactAgentLambda(ctx context.Context) (lba *compose.Lambda, err error) {
-	return newReactAgentLambdaWithOptions(ctx, ChatAgentOptions{})
-}
-
 func newReactAgentLambdaWithOptions(ctx context.Context, opts ChatAgentOptions) (lba *compose.Lambda, err error) {
 	maxStep := opts.ReactMaxStep
 	if maxStep <= 0 {
-		maxStep = 25
+		maxStep = defaultReactMaxStep(ctx)
 	}
 	config := &react.AgentConfig{
 		MaxStep:            maxStep,
@@ -28,10 +26,6 @@ func newReactAgentLambdaWithOptions(ctx context.Context, opts ChatAgentOptions) 
 		}
 	}
 	config.ToolCallingModel = chatModelIns11
-	//searchTool, err := newSearchTool(ctx)
-	//if err != nil {
-	//	return nil, err
-	//}
 	toolList := opts.Tools
 	if toolList == nil {
 		toolList, err = tools.NewRegistry().ToolsFor(ctx, tools.ScenarioChat)
@@ -50,4 +44,14 @@ func newReactAgentLambdaWithOptions(ctx context.Context, opts ChatAgentOptions) 
 		return nil, err
 	}
 	return lba, nil
+}
+
+func defaultReactMaxStep(ctx context.Context) int {
+	principal := authz.PrincipalFromContext(ctx)
+	for _, role := range principal.Roles {
+		if strings.EqualFold(strings.TrimSpace(role), "sregym") {
+			return 50
+		}
+	}
+	return 25
 }

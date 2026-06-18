@@ -139,6 +139,35 @@ func TestSimpleMemoryPersistsMessagesAndSummary(t *testing.T) {
 	}
 }
 
+func TestSimpleMemoryLogsPersistErrorWithoutPanic(t *testing.T) {
+	restore := setMemoryStoreForTest(failingMemoryStore{})
+	defer restore()
+
+	memory := GetSimpleMemory("failing-store-session")
+	memory.SetMessages(schema.UserMessage("this should not panic"))
+}
+
+func TestPruneStaleMemoriesRemovesIdleSessions(t *testing.T) {
+	restore := setMemoryStoreForTest(nil)
+	defer restore()
+
+	now := time.Now()
+	active := GetSimpleMemory("active-session")
+	stale := GetSimpleMemory("stale-session")
+	active.UpdatedAt = now.Add(-time.Hour)
+	stale.UpdatedAt = now.Add(-25 * time.Hour)
+
+	if removed := PruneStaleMemories(now, 24*time.Hour); removed != 1 {
+		t.Fatalf("expected one stale memory pruned, got %d", removed)
+	}
+	if _, ok := SimpleMemoryMap[active.ID]; !ok {
+		t.Fatal("expected active memory to remain")
+	}
+	if _, ok := SimpleMemoryMap[stale.ID]; ok {
+		t.Fatal("expected stale memory to be removed")
+	}
+}
+
 func TestConversationMemoryIsScopedByUserAndConversation(t *testing.T) {
 	restore := setMemoryStoreForTest(newFileMemoryStore(filepath.Join(t.TempDir(), "memory")))
 	defer restore()
@@ -167,6 +196,20 @@ func TestConversationMemoryIsScopedByUserAndConversation(t *testing.T) {
 	if got := reloadedBob.GetMessages()[0].Content; got != "bob question" {
 		t.Fatalf("expected persisted bob memory to stay isolated, got %q", got)
 	}
+}
+
+type failingMemoryStore struct{}
+
+func (failingMemoryStore) Load(id string) (*memorySnapshot, error) {
+	return nil, nil
+}
+
+func (failingMemoryStore) Save(snapshot *memorySnapshot) error {
+	return os.ErrPermission
+}
+
+func (failingMemoryStore) Append(snapshot *memorySnapshot, msg *schema.Message) error {
+	return os.ErrPermission
 }
 
 func TestMySQLMemoryStorePersistsMessagesAndSummary(t *testing.T) {
