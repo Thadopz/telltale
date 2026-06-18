@@ -4,7 +4,10 @@ import (
 	"SREagent/internal/authz"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -39,7 +42,50 @@ func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	if !decision.Allowed {
 		return marshalToolError(nil, "tool authorization denied: "+decision.Reason), nil
 	}
-	return t.inner.InvokableRun(ctx, argumentsInJSON, opts...)
+
+	timeout := toolCallTimeout(ctx)
+	return invokeToolWithTimeout(ctx, t.inner, info.Name, argumentsInJSON, timeout, opts...)
+}
+
+type toolRunResult struct {
+	output string
+	err    error
+}
+
+func invokeToolWithTimeout(
+	ctx context.Context,
+	inner tool.InvokableTool,
+	toolName string,
+	argumentsInJSON string,
+	timeout time.Duration,
+	opts ...tool.Option,
+) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resultCh := make(chan toolRunResult, 1)
+	go func() {
+		output, err := inner.InvokableRun(runCtx, argumentsInJSON, opts...)
+		resultCh <- toolRunResult{output: output, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		if errors.Is(result.err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return toolTimeoutOutput(toolName, timeout), nil
+		}
+		return result.output, result.err
+	case <-runCtx.Done():
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return toolTimeoutOutput(toolName, timeout), nil
+	}
+}
+
+func toolTimeoutOutput(toolName string, timeout time.Duration) string {
+	message := fmt.Sprintf("tool %s timed out after %s", toolName, timeout)
+	return marshalToolError(context.DeadlineExceeded, message)
 }
 
 func toolAllowedForRegistration(ctx context.Context, toolName string, overridePermission authz.Permission) bool {

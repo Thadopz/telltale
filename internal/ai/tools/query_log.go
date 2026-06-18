@@ -23,6 +23,10 @@ https://www.cloudwego.io/zh/docs/eino/ecosystem_integration/tool/tool_mcp/
 https://mcp-go.dev/clients
 */
 func GetLogMcpTool(ctx context.Context) ([]tool.BaseTool, error) {
+	return loadToolsWithTimeout(ctx, mcpRegistrationTimeout(ctx), loadLogMcpTools)
+}
+
+func loadLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
 	mcpUrl := getMCPLogURL(ctx)
 	cli, err := client.NewSSEMCPClient(mcpUrl)
 	if err != nil {

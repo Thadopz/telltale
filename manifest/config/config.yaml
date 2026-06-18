@@ -73,6 +73,8 @@ project_context:
   max_chars: 12000
 
 tools:
+  call_timeout_seconds: 30
+  mcp_registration_timeout_seconds: 30
   mysql:
     max_rows: 100
     allow_write: false
