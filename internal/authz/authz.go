@@ -2,6 +2,8 @@ package authz
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,6 +22,7 @@ const (
 	PermMySQLWrite  Permission = "tool:mysql.write"
 	PermPaymentRead Permission = "tool:payment.read"
 	PermTimeRead    Permission = "tool:time.read"
+	PermSREGym      Permission = "tool:sregym"
 )
 
 type RiskLevel string
@@ -55,6 +58,13 @@ type Decision struct {
 type Authorizer struct{}
 
 type contextKey struct{}
+type confirmationContextKey struct{}
+
+type ToolConfirmation struct {
+	Token         string
+	ToolName      string
+	ArgumentsHash string
+}
 
 const (
 	headerUserID   = "X-User-Id"
@@ -71,6 +81,28 @@ func PrincipalFromContext(ctx context.Context) Principal {
 		return normalizePrincipal(ctx, principal)
 	}
 	return normalizePrincipal(ctx, Principal{})
+}
+
+func WithToolConfirmation(ctx context.Context, confirmation ToolConfirmation) context.Context {
+	confirmation.Token = strings.TrimSpace(confirmation.Token)
+	confirmation.ToolName = strings.TrimSpace(confirmation.ToolName)
+	confirmation.ArgumentsHash = strings.TrimSpace(confirmation.ArgumentsHash)
+	return context.WithValue(ctx, confirmationContextKey{}, confirmation)
+}
+
+func IsToolCallConfirmed(ctx context.Context, toolName string, argumentsInJSON string) bool {
+	confirmation, ok := ctx.Value(confirmationContextKey{}).(ToolConfirmation)
+	if !ok {
+		return false
+	}
+	return confirmation.Token != "" &&
+		confirmation.ToolName == strings.TrimSpace(toolName) &&
+		confirmation.ArgumentsHash == HashArguments(argumentsInJSON)
+}
+
+func HashArguments(argumentsInJSON string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(argumentsInJSON)))
+	return hex.EncodeToString(sum[:])
 }
 
 func PrincipalFromRequest(ctx context.Context, req *ghttp.Request, fallbackUserID string) Principal {
@@ -175,9 +207,11 @@ func scopesForRole(ctx context.Context, role string) []Permission {
 
 	switch role {
 	case "admin":
-		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermMySQLRead, PermMySQLWrite}
+		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermMySQLRead, PermMySQLWrite, PermSREGym}
 	case "oncall":
 		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermMySQLRead}
+	case "sregym":
+		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermSREGym}
 	default:
 		return []Permission{PermDocsRead, PermTimeRead}
 	}

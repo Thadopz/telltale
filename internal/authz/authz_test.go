@@ -57,3 +57,36 @@ func TestAuthorizerDeniesAdminWriteWhenServerPolicyDisabled(t *testing.T) {
 		t.Fatalf("expected mysql write to be denied when server write policy is disabled")
 	}
 }
+
+func TestToolConfirmationMatchesToolAndArguments(t *testing.T) {
+	args := `{"operate_type":"update","sql":"update orders set status='done'"}`
+	ctx := WithToolConfirmation(context.Background(), ToolConfirmation{
+		Token:         "token-1",
+		ToolName:      "mysql_crud",
+		ArgumentsHash: HashArguments(args),
+	})
+	if !IsToolCallConfirmed(ctx, "mysql_crud", args) {
+		t.Fatal("expected matching confirmation to confirm tool call")
+	}
+	if IsToolCallConfirmed(ctx, "mysql_crud", `{"operate_type":"delete"}`) {
+		t.Fatal("expected mismatched arguments to be rejected")
+	}
+	if IsToolCallConfirmed(ctx, "other_tool", args) {
+		t.Fatal("expected mismatched tool to be rejected")
+	}
+}
+
+func TestAuthorizerAllowsConfirmedAdminWriteWhenServerPolicyEnabled(t *testing.T) {
+	ctx := WithPrincipal(context.Background(), Principal{UserID: "admin", Roles: []string{"admin"}})
+	decision := NewAuthorizer().Authorize(ctx, ToolCall{
+		Name:               "mysql_crud",
+		Permission:         PermMySQLWrite,
+		Risk:               RiskWrite,
+		RequiresConfirm:    true,
+		Confirmed:          true,
+		ServerWriteEnabled: true,
+	})
+	if !decision.Allowed {
+		t.Fatalf("expected confirmed admin write to be allowed, got %s", decision.Reason)
+	}
+}
