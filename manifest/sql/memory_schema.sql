@@ -71,8 +71,17 @@ CREATE TABLE IF NOT EXISTS tool_results (
   output_summary TEXT NOT NULL,
   output JSON NULL,
   status VARCHAR(32) NOT NULL,
+  evidence_id VARCHAR(64) NULL,
+  failed_query_id VARCHAR(64) NULL,
+  can_use_as_evidence TINYINT(1) NOT NULL DEFAULT 0,
+  data_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
+  subject JSON NULL,
+  scope JSON NULL,
+  observations JSON NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   KEY idx_conversation_created (conversation_id, created_at),
-  KEY idx_tool_name_created (tool_name, created_at)
+  KEY idx_tool_name_created (tool_name, created_at),
+  KEY idx_conversation_evidence (conversation_id, evidence_id),
+  KEY idx_conversation_failed_query (conversation_id, failed_query_id)
 ) ENGINE=InnoDB;

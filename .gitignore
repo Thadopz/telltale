@@ -16,6 +16,7 @@ output/
 manifest/output/
 temp/
 temp.yaml
+manifest/config/config.local.yaml
 bin
 
 manifest/docker/volumes
@@ -28,3 +29,5 @@ frontend/
 *frontend/
 docs/
 **/docs/
+__pycache__/
+*.pyc

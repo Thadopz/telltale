@@ -22,17 +22,20 @@ const (
 )
 
 type Envelope struct {
-	Success          bool   `json:"success"`
-	Status           string `json:"status"`
-	EvidenceID       string `json:"evidence_id,omitempty"`
-	FailedQueryID    string `json:"failed_query_id,omitempty"`
-	CanUseAsEvidence bool   `json:"can_use_as_evidence"`
-	DataStatus       string `json:"data_status"`
-	Data             any    `json:"data,omitempty"`
-	Error            string `json:"error,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
-	Message          string `json:"message,omitempty"`
-	Summary          string `json:"summary,omitempty"`
+	Success          bool          `json:"success"`
+	Status           string        `json:"status"`
+	EvidenceID       string        `json:"evidence_id,omitempty"`
+	FailedQueryID    string        `json:"failed_query_id,omitempty"`
+	CanUseAsEvidence bool          `json:"can_use_as_evidence"`
+	DataStatus       string        `json:"data_status"`
+	Data             any           `json:"data,omitempty"`
+	Subject          SubjectRef    `json:"subject,omitempty"`
+	Scope            EvidenceScope `json:"scope,omitempty"`
+	Observations     []Observation `json:"observations,omitempty"`
+	Error            string        `json:"error,omitempty"`
+	ErrorCode        string        `json:"error_code,omitempty"`
+	Message          string        `json:"message,omitempty"`
+	Summary          string        `json:"summary,omitempty"`
 }
 
 type Parsed struct {
@@ -41,20 +44,27 @@ type Parsed struct {
 }
 
 func NewData(data any, message string) Envelope {
+	return NewDataWithObservations(data, message, nil)
+}
+
+func NewDataWithObservations(data any, message string, observations []Observation) Envelope {
 	dataStatus := DataPresent
 	if isEmptyData(data) {
 		dataStatus = DataEmpty
 	}
-	return Envelope{
+	env := Envelope{
 		Success:          true,
 		Status:           StatusSuccess,
 		EvidenceID:       newID("ev"),
 		CanUseAsEvidence: true,
 		DataStatus:       dataStatus,
 		Data:             data,
+		Observations:     normalizeObservations(observations),
 		Message:          message,
 		Summary:          message,
 	}
+	env.Subject, env.Scope = firstSubjectScope(env.Observations)
+	return env
 }
 
 func NewError(err error, message string) Envelope {
@@ -143,10 +153,15 @@ func normalize(env *Envelope) {
 		if strings.TrimSpace(env.EvidenceID) == "" {
 			env.CanUseAsEvidence = false
 		}
+		env.Observations = normalizeObservations(env.Observations)
+		if strings.TrimSpace(env.Subject.Service) == "" && strings.TrimSpace(env.Subject.OrderNo) == "" && strings.TrimSpace(env.Subject.TraceID) == "" {
+			env.Subject, env.Scope = firstSubjectScope(env.Observations)
+		}
 	} else {
 		env.Success = false
 		env.CanUseAsEvidence = false
 		env.EvidenceID = ""
+		env.Observations = nil
 		if strings.TrimSpace(env.FailedQueryID) == "" {
 			env.FailedQueryID = newID("fq")
 		}
@@ -160,6 +175,25 @@ func normalize(env *Envelope) {
 	if strings.TrimSpace(env.Summary) == "" && env.Error != "" {
 		env.Summary = env.Error
 	}
+}
+
+func normalizeObservations(observations []Observation) []Observation {
+	out := make([]Observation, 0, len(observations))
+	for _, obs := range observations {
+		obs.Kind = strings.TrimSpace(obs.Kind)
+		if !ValidObservation(obs) {
+			continue
+		}
+		out = append(out, obs)
+	}
+	return out
+}
+
+func firstSubjectScope(observations []Observation) (SubjectRef, EvidenceScope) {
+	for _, obs := range observations {
+		return obs.Subject, obs.Scope
+	}
+	return SubjectRef{}, EvidenceScope{}
 }
 
 func isEmptyData(data any) bool {

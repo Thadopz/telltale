@@ -1,14 +1,17 @@
 package trace
 
 import (
+	"SREagent/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/tool"
 )
 
 type AgentStep struct {
@@ -25,6 +28,17 @@ type AgentStep struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type ToolEvidence struct {
+	ToolName      string            `json:"tool_name"`
+	InputJSON     string            `json:"input_json,omitempty"`
+	OutputJSON    string            `json:"output_json,omitempty"`
+	Envelope      evidence.Envelope `json:"envelope"`
+	EvidenceID    string            `json:"evidence_id,omitempty"`
+	FailedQueryID string            `json:"failed_query_id,omitempty"`
+	Status        string            `json:"status"`
+	Summary       string            `json:"summary,omitempty"`
+}
+
 func (s AgentStep) String() string {
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -34,12 +48,14 @@ func (s AgentStep) String() string {
 }
 
 type Recorder struct {
-	mu    sync.Mutex
-	steps []AgentStep
+	mu           sync.Mutex
+	steps        []AgentStep
+	toolInputs   map[string][]string
+	toolEvidence []ToolEvidence
 }
 
 func NewRecorder() *Recorder {
-	return &Recorder{}
+	return &Recorder{toolInputs: make(map[string][]string)}
 }
 
 func (r *Recorder) Record(step AgentStep) AgentStep {
@@ -80,10 +96,74 @@ func (r *Recorder) Strings() []string {
 	return res
 }
 
+func (r *Recorder) ToolEvidence() []ToolEvidence {
+	if r == nil {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	items := make([]ToolEvidence, len(r.toolEvidence))
+	copy(items, r.toolEvidence)
+	return items
+}
+
+func (r *Recorder) PushToolInput(name string, input string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.toolInputs == nil {
+		r.toolInputs = make(map[string][]string)
+	}
+	r.toolInputs[name] = append(r.toolInputs[name], input)
+}
+
+func (r *Recorder) PopToolInput(name string) string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	values := r.toolInputs[name]
+	if len(values) == 0 {
+		return ""
+	}
+	value := values[0]
+	r.toolInputs[name] = values[1:]
+	return value
+}
+
+func (r *Recorder) RecordToolEvidence(item ToolEvidence) {
+	if r == nil {
+		return
+	}
+	item.ToolName = strings.TrimSpace(item.ToolName)
+	item.EvidenceID = strings.TrimSpace(item.Envelope.EvidenceID)
+	item.FailedQueryID = strings.TrimSpace(item.Envelope.FailedQueryID)
+	item.Status = strings.TrimSpace(item.Envelope.Status)
+	item.Summary = strings.TrimSpace(item.Envelope.Summary)
+	if item.Summary == "" {
+		item.Summary = strings.TrimSpace(item.Envelope.Message)
+	}
+	if item.Summary == "" {
+		item.Summary = strings.TrimSpace(item.Envelope.Error)
+	}
+	if item.ToolName == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.toolEvidence = append(r.toolEvidence, item)
+}
+
 func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	builder := callbacks.NewHandlerBuilder()
 
 	builder.OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		recordToolInput(info, input, recorder)
 		recorder.Record(AgentStep{
 			Agent:     agent,
 			Phase:     "start",
@@ -96,6 +176,7 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	})
 
 	builder.OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+		recordToolOutput(info, output, recorder)
 		recorder.Record(AgentStep{
 			Agent:     agent,
 			Phase:     "end",
@@ -104,6 +185,11 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 			Name:      info.Name,
 			Output:    compactJSON(output),
 		})
+		return ctx
+	})
+
+	builder.OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+		recordToolError(info, err, recorder)
 		return ctx
 	})
 
@@ -117,6 +203,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		if info == nil {
 			return ctx
 		}
+		recordToolInput(info, input, recorder)
 		step := recorder.Record(AgentStep{
 			Agent:     agent,
 			Phase:     "start",
@@ -133,6 +220,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		if info == nil {
 			return ctx
 		}
+		recordToolOutput(info, output, recorder)
 		step := recorder.Record(AgentStep{
 			Agent:     agent,
 			Phase:     "end",
@@ -153,6 +241,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		if err != nil {
 			errText = err.Error()
 		}
+		recordToolError(info, err, recorder)
 		step := recorder.Record(AgentStep{
 			Agent:     agent,
 			Phase:     "error",
@@ -166,6 +255,47 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 	})
 
 	return builder.Build()
+}
+
+func recordToolInput(info *callbacks.RunInfo, input callbacks.CallbackInput, recorder *Recorder) {
+	if info == nil || info.Component != components.ComponentOfTool {
+		return
+	}
+	toolInput := tool.ConvCallbackInput(input)
+	if toolInput == nil {
+		return
+	}
+	recorder.PushToolInput(info.Name, toolInput.ArgumentsInJSON)
+}
+
+func recordToolOutput(info *callbacks.RunInfo, output callbacks.CallbackOutput, recorder *Recorder) {
+	if info == nil || info.Component != components.ComponentOfTool {
+		return
+	}
+	toolOutput := tool.ConvCallbackOutput(output)
+	response := ""
+	if toolOutput != nil {
+		response = toolOutput.Response
+	}
+	parsed := evidence.Parse(response).Envelope
+	recorder.RecordToolEvidence(ToolEvidence{
+		ToolName:   info.Name,
+		InputJSON:  recorder.PopToolInput(info.Name),
+		OutputJSON: response,
+		Envelope:   parsed,
+	})
+}
+
+func recordToolError(info *callbacks.RunInfo, err error, recorder *Recorder) {
+	if info == nil || info.Component != components.ComponentOfTool {
+		return
+	}
+	env := evidence.NewError(err, "tool callback error")
+	recorder.RecordToolEvidence(ToolEvidence{
+		ToolName:  info.Name,
+		InputJSON: recorder.PopToolInput(info.Name),
+		Envelope:  env,
+	})
 }
 
 func emitTraceStep(info *callbacks.RunInfo, step AgentStep, emit func(event string, step AgentStep)) {

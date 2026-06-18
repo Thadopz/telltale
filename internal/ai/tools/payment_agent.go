@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"SREagent/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 )
 
 var defaultPaymentAgentBaseURL = "http://127.0.0.1:8000"
+
+type paymentObservationBuilder func(payload any) []evidence.Observation
 
 type QueryPaymentAnomalyInput struct {
 	Type           string `json:"type,omitempty" jsonschema:"description=Anomaly type filter, such as PAYMENT_FAILURE_RATE_HIGH, ORDER_SUCCESS_RATE_LOW, PAYMENT_STATE_MISMATCH, ORDER_PENDING_TOO_LONG"`
@@ -61,7 +64,7 @@ func NewQueryPaymentAnomalyTool() (tool.InvokableTool, error) {
 				addQuery(values, "relatedOrderId", input.RelatedOrderID)
 				addPositiveIntQuery(values, "limit", input.Limit)
 			}
-			return callPaymentAgent(ctx, "/api/v1/agent/query_anomaly_event", values, "payment anomaly query completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/query_anomaly_event", values, "payment anomaly query completed", paymentAnomalyObservations(input))
 		})
 }
 
@@ -81,7 +84,7 @@ func NewQueryPaymentMetricsTool() (tool.InvokableTool, error) {
 				addQuery(values, "endTime", input.EndTime)
 			}
 			addQuery(values, "service", service)
-			return callPaymentAgent(ctx, "/api/v1/agent/query_business_metric", values, "payment metrics query completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/query_business_metric", values, "payment metrics query completed", paymentMetricObservations(input, service))
 		})
 }
 
@@ -96,7 +99,7 @@ func NewQueryPaymentOrderDetailTool() (tool.InvokableTool, error) {
 			}
 			values := url.Values{}
 			addQuery(values, "paymentOrderNo", orderNo)
-			return callPaymentAgent(ctx, "/api/v1/agent/query_order_detail", values, "payment order detail query completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/query_order_detail", values, "payment order detail query completed", paymentOrderObservations(orderNo))
 		})
 }
 
@@ -111,7 +114,7 @@ func NewCheckPaymentConsistencyTool() (tool.InvokableTool, error) {
 			}
 			values := url.Values{}
 			addQuery(values, "paymentOrderNo", orderNo)
-			return callPaymentAgent(ctx, "/api/v1/agent/check_order_consistency", values, "payment consistency check completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/check_order_consistency", values, "payment consistency check completed", paymentConsistencyObservations(orderNo))
 		})
 }
 
@@ -127,7 +130,7 @@ func NewSearchPaymentLogsTool() (tool.InvokableTool, error) {
 				addQuery(values, "keyword", input.Keyword)
 				addPositiveIntQuery(values, "limit", input.Limit)
 			}
-			return callPaymentAgent(ctx, "/api/v1/agent/search_error_logs", values, "payment diagnostic logs query completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/search_error_logs", values, "payment diagnostic logs query completed", paymentLogObservations(input))
 		})
 }
 
@@ -140,11 +143,11 @@ func NewQueryPaymentStatusDistributionTool() (tool.InvokableTool, error) {
 			if input != nil {
 				addPositiveIntQuery(values, "minutes", input.Minutes)
 			}
-			return callPaymentAgent(ctx, "/api/v1/agent/query_recent_status_distribution", values, "payment status distribution query completed")
+			return callPaymentAgent(ctx, "/api/v1/agent/query_recent_status_distribution", values, "payment status distribution query completed", paymentStatusDistributionObservations(input))
 		})
 }
 
-func callPaymentAgent(ctx context.Context, path string, values url.Values, message string) (string, error) {
+func callPaymentAgent(ctx context.Context, path string, values url.Values, message string, buildObservations paymentObservationBuilder) (string, error) {
 	endpoint, err := paymentAgentURL(ctx, path, values)
 	if err != nil {
 		return marshalToolError(err, "build payment agent request failed"), nil
@@ -171,7 +174,135 @@ func callPaymentAgent(ctx context.Context, path string, values url.Values, messa
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return marshalToolError(err, "parse payment agent response failed"), nil
 	}
-	return marshalToolData(payload, message), nil
+	observations := []evidence.Observation{}
+	if buildObservations != nil {
+		observations = buildObservations(payload)
+	}
+	return marshalToolEvidence(payload, message, observations), nil
+}
+
+func paymentAnomalyObservations(input *QueryPaymentAnomalyInput) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationMetricAnomaly
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		fields := map[string]any{}
+		if input != nil {
+			setAny(fields, "type", input.Type)
+			setAny(fields, "status", input.Status)
+			setAny(fields, "severity", input.Severity)
+			setAny(fields, "order_no", input.RelatedOrderID)
+			if input.Limit > 0 {
+				fields["limit"] = input.Limit
+			}
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: evidence.SubjectRef{Type: "payment", Service: "payment", OrderNo: stringField(fields, "order_no")},
+			Fields:  fields,
+			Summary: "payment anomaly query observation",
+		}}
+	}
+}
+
+func paymentMetricObservations(input *QueryPaymentMetricsInput, service string) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationMetricValue
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		fields := map[string]any{"service": service}
+		scope := evidence.EvidenceScope{}
+		if input != nil {
+			setAny(fields, "metric_name", input.MetricName)
+			scope.StartTime = strings.TrimSpace(input.StartTime)
+			scope.EndTime = strings.TrimSpace(input.EndTime)
+		}
+		if metricName := strings.ToLower(stringField(fields, "metric_name")); strings.Contains(metricName, "fail") || strings.Contains(metricName, "error") {
+			kind = evidence.ObservationMetricAnomaly
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: evidence.SubjectRef{Type: "payment", Service: service},
+			Scope:   scope,
+			Fields:  fields,
+			Summary: "payment metric observation",
+		}}
+	}
+}
+
+func paymentOrderObservations(orderNo string) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationOrderState
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: evidence.SubjectRef{Type: "order", Service: "payment", OrderNo: orderNo},
+			Fields:  map[string]any{"order_no": orderNo},
+			Summary: "payment order state observation",
+		}}
+	}
+}
+
+func paymentConsistencyObservations(orderNo string) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationStateMismatch
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: evidence.SubjectRef{Type: "order", Service: "payment", OrderNo: orderNo},
+			Fields:  map[string]any{"order_no": orderNo},
+			Summary: "payment consistency observation",
+		}}
+	}
+}
+
+func paymentLogObservations(input *SearchPaymentLogsInput) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationLogError
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		fields := map[string]any{}
+		subject := evidence.SubjectRef{Type: "log", Service: "payment"}
+		if input != nil {
+			setAny(fields, "order_no", input.OrderID)
+			setAny(fields, "level", input.Level)
+			setAny(fields, "error_code", input.Keyword)
+			subject.OrderNo = strings.TrimSpace(input.OrderID)
+			subject.TraceID = strings.TrimSpace(input.Keyword)
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: subject,
+			Fields:  fields,
+			Summary: "payment log error observation",
+		}}
+	}
+}
+
+func paymentStatusDistributionObservations(input *QueryPaymentStatusDistributionInput) paymentObservationBuilder {
+	return func(payload any) []evidence.Observation {
+		kind := evidence.ObservationStatusDistribution
+		if isEmptyPayload(payload) {
+			kind = evidence.ObservationEmptyResult
+		}
+		fields := map[string]any{"service": "payment"}
+		if input != nil && input.Minutes > 0 {
+			fields["minutes"] = input.Minutes
+		}
+		return []evidence.Observation{{
+			Kind:    kind,
+			Subject: evidence.SubjectRef{Type: "payment", Service: "payment"},
+			Fields:  fields,
+			Summary: "payment status distribution observation",
+		}}
+	}
 }
 
 func paymentAgentURL(ctx context.Context, path string, values url.Values) (string, error) {
@@ -221,4 +352,45 @@ func requirePaymentOrderNo(input *PaymentOrderDetailInput) (string, error) {
 		return "", fmt.Errorf("missing payment_order_no")
 	}
 	return orderNo, nil
+}
+
+func setAny(fields map[string]any, key string, value string) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		fields[key] = value
+	}
+}
+
+func stringField(fields map[string]any, key string) string {
+	if fields == nil {
+		return ""
+	}
+	if raw, ok := fields[key].(string); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
+func isEmptyPayload(payload any) bool {
+	if payload == nil {
+		return true
+	}
+	switch v := payload.(type) {
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		if len(v) == 0 {
+			return true
+		}
+		for _, key := range []string{"data", "items", "list", "records", "rows", "events", "logs"} {
+			if raw, ok := v[key]; ok {
+				return isEmptyPayload(raw)
+			}
+		}
+		return false
+	case string:
+		return strings.TrimSpace(v) == ""
+	default:
+		return false
+	}
 }
