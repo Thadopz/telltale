@@ -33,6 +33,12 @@ type toolResultRow struct {
 	Status        string `json:"status"`
 }
 
+type evidenceResultRow struct {
+	ToolName string `json:"tool_name"`
+	Output   string `json:"output"`
+	Status   string `json:"status"`
+}
+
 type toolResultRecorder struct {
 	storageID string
 	mu        sync.Mutex
@@ -175,14 +181,136 @@ func saveToolResultByStorageID(ctx context.Context, storageID string, result Too
 		"output_summary":  trimSessionStateText(result.OutputSummary, toolResultSummaryMaxChars),
 		"status":          result.Status,
 	}
+	structured := g.Map{}
 	if json.Valid([]byte(result.InputJSON)) {
 		data["input"] = result.InputJSON
 	}
 	if json.Valid([]byte(result.OutputJSON)) {
 		data["output"] = result.OutputJSON
+		env := evidence.Parse(result.OutputJSON).Envelope
+		structured = structuredEvidenceColumns(env)
+		for key, value := range structured {
+			data[key] = value
+		}
 	}
 	_, err := g.DB().Model("tool_results").Ctx(ctx).Data(data).Insert()
+	if err != nil && len(structured) > 0 && isUnknownStructuredEvidenceColumn(err) {
+		for key := range structured {
+			delete(data, key)
+		}
+		_, err = g.DB().Model("tool_results").Ctx(ctx).Data(data).Insert()
+	}
 	return err
+}
+
+func ListUsableEvidence(ctx context.Context, conversationID string, limit int) ([]evidence.EvidenceItem, error) {
+	rows, err := loadEvidenceRows(ctx, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]evidence.EvidenceItem, 0, len(rows))
+	for _, row := range rows {
+		env := evidence.Parse(row.Output).Envelope
+		if env.Status != evidence.StatusSuccess || !env.CanUseAsEvidence || strings.TrimSpace(env.EvidenceID) == "" || len(env.Observations) == 0 {
+			continue
+		}
+		items = append(items, evidence.EvidenceItem{
+			EvidenceID:   env.EvidenceID,
+			ToolName:     row.ToolName,
+			Scope:        env.Scope,
+			Subject:      env.Subject,
+			Observations: env.Observations,
+			RawOutput:    json.RawMessage(row.Output),
+			Summary:      env.Summary,
+		})
+	}
+	return items, nil
+}
+
+func ListFailedQueries(ctx context.Context, conversationID string, limit int) ([]evidence.FailedQuery, error) {
+	rows, err := loadEvidenceRows(ctx, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]evidence.FailedQuery, 0, len(rows))
+	for _, row := range rows {
+		env := evidence.Parse(row.Output).Envelope
+		if strings.TrimSpace(env.FailedQueryID) == "" {
+			continue
+		}
+		items = append(items, evidence.FailedQuery{
+			FailedQueryID: env.FailedQueryID,
+			ToolName:      row.ToolName,
+			Status:        env.Status,
+			Summary:       env.Summary,
+		})
+	}
+	return items, nil
+}
+
+func FindEvidenceByID(ctx context.Context, conversationID string, evidenceID string) (*evidence.EvidenceItem, error) {
+	items, err := ListUsableEvidence(ctx, conversationID, toolResultContextLimit)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.EvidenceID == evidenceID {
+			found := item
+			return &found, nil
+		}
+	}
+	return nil, nil
+}
+
+func loadEvidenceRows(ctx context.Context, conversationID string, limit int) ([]evidenceResultRow, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = toolResultContextLimit
+	}
+	var rows []evidenceResultRow
+	err := g.DB().Model("tool_results").
+		Ctx(ctx).
+		Fields("tool_name", "output", "status").
+		Where("conversation_id", conversationID).
+		OrderDesc("id").
+		Limit(limit).
+		Scan(&rows)
+	return rows, err
+}
+
+func structuredEvidenceColumns(env evidence.Envelope) g.Map {
+	columns := g.Map{
+		"evidence_id":         env.EvidenceID,
+		"failed_query_id":     env.FailedQueryID,
+		"can_use_as_evidence": env.CanUseAsEvidence,
+		"data_status":         env.DataStatus,
+	}
+	if subject, err := json.Marshal(env.Subject); err == nil && string(subject) != "{}" {
+		columns["subject"] = string(subject)
+	}
+	if scope, err := json.Marshal(env.Scope); err == nil && string(scope) != "{}" {
+		columns["scope"] = string(scope)
+	}
+	if observations, err := json.Marshal(env.Observations); err == nil && string(observations) != "null" {
+		columns["observations"] = string(observations)
+	}
+	return columns
+}
+
+func isUnknownStructuredEvidenceColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, column := range []string{"evidence_id", "failed_query_id", "can_use_as_evidence", "data_status", "subject", "scope", "observations"} {
+		if strings.Contains(msg, column) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *toolResultRecorder) pushInput(name string, input string) {

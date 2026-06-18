@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"SREagent/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -52,7 +53,7 @@ func TestQueryPaymentAnomalyToolCallsAgent(t *testing.T) {
 	values := url.Values{}
 	values.Set("status", "OPEN")
 	values.Set("limit", "5")
-	out, err := callPaymentAgent(context.Background(), "/api/v1/agent/query_anomaly_event", values, "ok")
+	out, err := callPaymentAgent(context.Background(), "/api/v1/agent/query_anomaly_event", values, "ok", paymentAnomalyObservations(nil))
 	if err != nil {
 		t.Fatalf("call payment agent: %v", err)
 	}
@@ -64,6 +65,10 @@ func TestQueryPaymentAnomalyToolCallsAgent(t *testing.T) {
 	}
 	if !strings.Contains(out, "PAYMENT_FAILURE_RATE_HIGH") {
 		t.Fatalf("expected anomaly response in output, got %s", out)
+	}
+	parsed := evidence.Parse(out).Envelope
+	if len(parsed.Observations) != 1 || parsed.Observations[0].Kind != evidence.ObservationMetricAnomaly {
+		t.Fatalf("expected payment anomaly observation, got %#v", parsed.Observations)
 	}
 }
 

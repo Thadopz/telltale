@@ -10,6 +10,9 @@ type ToolOutput struct {
 	CanUseAsEvidence bool   `json:"can_use_as_evidence,omitempty"`
 	DataStatus       string `json:"data_status,omitempty"`
 	Data             any    `json:"data,omitempty"`
+	Subject          evidence.SubjectRef
+	Scope            evidence.EvidenceScope
+	Observations     []evidence.Observation
 	Error            string `json:"error,omitempty"`
 	ErrorCode        string `json:"error_code,omitempty"`
 	Message          string `json:"message,omitempty"`
@@ -25,6 +28,9 @@ func marshalToolOutput(output ToolOutput) string {
 		CanUseAsEvidence: output.CanUseAsEvidence,
 		DataStatus:       output.DataStatus,
 		Data:             output.Data,
+		Subject:          output.Subject,
+		Scope:            output.Scope,
+		Observations:     output.Observations,
 		Error:            output.Error,
 		ErrorCode:        output.ErrorCode,
 		Message:          output.Message,
@@ -34,6 +40,10 @@ func marshalToolOutput(output ToolOutput) string {
 
 func marshalToolData(data any, message string) string {
 	return evidence.Marshal(evidence.NewData(data, message))
+}
+
+func marshalToolEvidence(data any, message string, observations []evidence.Observation) string {
+	return evidence.Marshal(evidence.NewDataWithObservations(data, message, observations))
 }
 
 func marshalToolError(err error, message string) string {

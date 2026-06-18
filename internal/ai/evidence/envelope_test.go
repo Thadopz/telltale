@@ -24,6 +24,24 @@ func TestNewDataCreatesUsableEvidence(t *testing.T) {
 	}
 }
 
+func TestNewDataWithObservationsKeepsStructuredFields(t *testing.T) {
+	raw := Marshal(NewDataWithObservations([]string{"row"}, "found rows", []Observation{{
+		Kind:    ObservationMetricAnomaly,
+		Subject: SubjectRef{Type: "payment", Service: "payment"},
+		Fields:  map[string]any{"metric_name": "payment_failed_rate"},
+	}}))
+	var env Envelope
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if len(env.Observations) != 1 || env.Observations[0].Kind != ObservationMetricAnomaly {
+		t.Fatalf("expected structured observation, got %#v", env.Observations)
+	}
+	if env.Subject.Service != "payment" {
+		t.Fatalf("expected subject from observation, got %#v", env.Subject)
+	}
+}
+
 func TestNewErrorCreatesFailedQuery(t *testing.T) {
 	env := NewError(errors.New("prometheus request timed out"), "query timeout")
 	if env.Success || env.Status != StatusTimeout {
