@@ -14,6 +14,7 @@ import (
 
 func main() {
 	ctx := gctx.New()
+	configureAppConfig(ctx)
 	fileDir, err := g.Cfg().Get(ctx, "file_dir")
 	if err != nil {
 		panic(err)
@@ -28,6 +29,6 @@ func main() {
 		group.Middleware(middleware.ResponseMiddleware)
 		group.Bind(chat.NewV1())
 	})
-	s.SetPort(6872)
+	s.SetPort(resolveServerPort(ctx))
 	s.Run()
 }

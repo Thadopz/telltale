@@ -1,6 +1,6 @@
 # https://goframe.org/docs/web/server-config-file-template
 server:
-  address: ":8000"
+  address: ":6872"
   openapiPath: "/api.json"
   swaggerPath: "/swagger"
 
@@ -12,11 +12,11 @@ logger:
 database:
   default:
     type: "mysql"
-    host: "YOUR_DB_HOST"
-    port: "YOUR_DB_PORT"
-    user: "YOUR_DB_USER"
-    pass: "YOUR_DB_PASSWORD"
-    name: "YOUR_DB_NAME"
+    host: "127.0.0.1"
+    port: "3306"
+    user: "superbiz"
+    pass: "superbiz"
+    name: "superbiz_agent"
 
 think_chat_model:
   description: "reasoning chat model for complex diagnosis"
@@ -43,8 +43,9 @@ rerank:
   observe_log: true
 
 milvus:
-  address: "YOUR_MILVUS_ADDRESS"
-  collection: "YOUR_MILVUS_COLLECTION"
+  address: "127.0.0.1:19530"
+  db_name: "agent"
+  collection: "biz"
   vector_dim: 36864
 
 knowledge_retrieval:

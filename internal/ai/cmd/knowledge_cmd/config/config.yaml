@@ -1,6 +1,6 @@
 # https://goframe.org/docs/web/server-config-file-template
 server:
-  address: ":8000"
+  address: ":6872"
   openapiPath: "/api.json"
   swaggerPath: "/swagger"
 
@@ -21,7 +21,7 @@ quick_chat_model:
   base_url: "YOUR_CHAT_API_BASE_URL"
   model: "FAST_CHAT_MODEL"
 
-# 豆包embedding下架，下面的api key和base url换成阿里云的
+
 embedding_model:
   description: "multimodal embedding model for knowledge retrieval"
   api_key: "YOUR_EMBEDDING_API_KEY"
