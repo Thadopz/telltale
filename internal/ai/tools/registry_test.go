@@ -102,6 +102,29 @@ func TestRegistryFiltersToolsForViewer(t *testing.T) {
 			t.Fatalf("expected viewer not to see %s, got %#v", denied, names)
 		}
 	}
+	if names[kubectlToolName] {
+		t.Fatalf("expected viewer not to see %s, got %#v", kubectlToolName, names)
+	}
+}
+
+func TestRegistryIncludesLocalKubectlToolForSREGymRole(t *testing.T) {
+	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "sregym", Roles: []string{"sregym"}})
+	tools, err := NewRegistry().ToolsFor(ctx, ScenarioChat)
+	if err != nil {
+		t.Fatalf("load chat tools: %v", err)
+	}
+
+	names := toolNames(t, ctx, tools)
+	if !names[kubectlToolName] {
+		t.Fatalf("expected %s for sregym role, got %#v", kubectlToolName, names)
+	}
+	meta, ok := LookupMetadata(kubectlToolName)
+	if !ok {
+		t.Fatalf("expected metadata for %s", kubectlToolName)
+	}
+	if meta.Permission != authz.PermSREGym {
+		t.Fatalf("expected %s permission, got %#v", authz.PermSREGym, meta)
+	}
 }
 
 func TestAuthorizedWrapperDeniesMysqlWriteWithoutServerPolicy(t *testing.T) {

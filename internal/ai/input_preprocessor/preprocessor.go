@@ -311,6 +311,10 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 		}
 		hints = append(hints, ToolHint{Name: name, Reason: reason})
 	}
+	normalized := strings.ToLower(p.CleanQuery)
+	if containsAny(normalized, "kubectl", "kubernetes", "k8s", "namespace", "pod", "deployment", "deploy/", "rollout", "astronomy-shop") {
+		add("exec_kubectl_cmd_safely", "Kubernetes cluster command or workload evidence")
+	}
 	switch p.Domain {
 	case DomainPayment, DomainOrder, DomainNotify:
 		add("query_payment_anomaly", "payment/order anomaly evidence")

@@ -36,6 +36,12 @@ var metadataByName = map[string]Metadata{
 		Permission:  authz.PermMetricsRead,
 		Description: "Query alert and metrics data.",
 	},
+	kubectlToolName: {
+		Name:        kubectlToolName,
+		Risk:        RiskReadOnly,
+		Permission:  authz.PermSREGym,
+		Description: "Execute kubectl commands in SREGym.",
+	},
 	"mysql_crud": {
 		Name:            "mysql_crud",
 		Risk:            RiskWrite,
