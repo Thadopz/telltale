@@ -1,7 +1,9 @@
 package chat_pipeline
 
 import (
+	"SREagent/internal/authz"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -210,6 +213,46 @@ func TestContextDocumentsSkipsKnowledgeForNormalChat(t *testing.T) {
 	}
 }
 
+func TestContextDocumentsReportsKnowledgeRetrievalFailure(t *testing.T) {
+	modelContext := ModelContext{
+		Content:        "show runbook",
+		KnowledgeQuery: "show runbook internal documentation",
+		UseKnowledge:   true,
+		Date:           "2026-05-21 09:30:00",
+	}
+	input := &UserMessage{Query: "show runbook", ModelContext: &modelContext}
+	got, err := newContextDocumentsLambdaWithOptions(ChatAgentOptions{
+		Retriever:  failingRetriever{err: fmt.Errorf("milvus unavailable")},
+		SkipRerank: true,
+	})(context.Background(), input)
+	if err != nil {
+		t.Fatalf("expected retrieval failure to degrade into context, got err=%v", err)
+	}
+	docs := toDocuments(got["documents"])
+	if len(docs) != 1 {
+		t.Fatalf("expected one status document, got %d", len(docs))
+	}
+	if !strings.Contains(docs[0].Content, "Knowledge retrieval status") || !strings.Contains(docs[0].Content, "milvus unavailable") {
+		t.Fatalf("expected explicit retrieval failure document, got %q", docs[0].Content)
+	}
+}
+
+func TestPreparedModelContextIsReused(t *testing.T) {
+	modelContext := ModelContext{
+		Content:         "cached content",
+		RequestAnalysis: "cached analysis",
+		Date:            "2026-05-21 09:30:00",
+	}
+	input := &UserMessage{Query: "different content", ModelContext: &modelContext}
+	got, err := newInputToChatLambda(context.Background(), input)
+	if err != nil {
+		t.Fatalf("expected input conversion success, got err=%v", err)
+	}
+	if got["content"] != "cached content" || got["date"] != "2026-05-21 09:30:00" {
+		t.Fatalf("expected prepared context to be reused, got %#v", got)
+	}
+}
+
 func TestInputToChatLoadsProjectContext(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -235,4 +278,21 @@ func TestInputToChatLoadsProjectContext(t *testing.T) {
 	if got["project_context"] != "Use project evidence rules." {
 		t.Fatalf("expected project context, got %#v", got["project_context"])
 	}
+}
+
+func TestChatAgentFactoryCacheKeySeparatesRoles(t *testing.T) {
+	factory := NewChatAgentFactory()
+	viewerKey := factory.cacheKey(authz.WithPrincipal(context.Background(), authz.Principal{UserID: "u1", Roles: []string{"viewer"}}))
+	oncallKey := factory.cacheKey(authz.WithPrincipal(context.Background(), authz.Principal{UserID: "u2", Roles: []string{"oncall"}}))
+	if viewerKey == oncallKey {
+		t.Fatalf("expected role-specific cache keys, got %q", viewerKey)
+	}
+}
+
+type failingRetriever struct {
+	err error
+}
+
+func (r failingRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
+	return nil, r.err
 }

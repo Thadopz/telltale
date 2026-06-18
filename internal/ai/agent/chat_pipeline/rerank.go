@@ -56,7 +56,7 @@ func rerankDocumentsLambda(ctx context.Context, input map[string]any, opts ...an
 	if err != nil {
 		// 降级：远程重排失败时，保留原始召回结果，避免整条链路失败。
 		g.Log().Warningf(ctx, "rerank failed, fallback to original docs, err=%v", err)
-		return map[string]any{"documents": docs}, nil
+		return map[string]any{"documents": docs, "rerank_error": err.Error()}, nil
 	}
 	if shouldObserveRerankLog(ctx) {
 		g.Log().Infof(ctx, "[rerank] topN=%d query=%s original=%v reranked=%v", topN, truncateForLog(query, 80), summarizeDocsForLog(docs), summarizeDocsForLog(ranked))

@@ -9,23 +9,69 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func EnforceEvidenceAnswer(ctx context.Context, answer string, steps []trace.AgentStep) (string, error) {
+func enforceEvidenceAnswerFromTrace(ctx context.Context, answer string, steps []trace.AgentStep) (string, error) {
+	if composed := composeCoverageAnswer(answer, steps); composed != "" {
+		return composed, nil
+	}
 	available := evidenceIDsFromTrace(steps)
-	validation := evidence.ValidateAnswer(answer, available)
-	if validation.OK {
-		return answer, nil
+	return validateAndRepairEvidenceAnswer(ctx, answer, steps, available, func(reasons []string) string {
+		return conservativeEvidenceAnswer(available, reasons)
+	})
+}
+
+func composeCoverageAnswer(answer string, steps []trace.AgentStep) string {
+	claims := evidence.ExtractCandidateClaims(answer)
+	if len(claims) == 0 {
+		return ""
 	}
-	if len(available.EvidenceIDs) == 0 && len(available.FailedQueryIDs) == 0 {
-		return answer, nil
+	evidenceItems, failedQueries := evidenceFromTrace(steps)
+	if len(evidenceItems) == 0 && len(failedQueries) == 0 {
+		return ""
 	}
-	repaired, err := repairEvidenceAnswer(ctx, answer, steps, validation.Reasons)
-	if err != nil {
-		return conservativeEvidenceAnswer(available, validation.Reasons), nil
+	registry := evidence.DefaultClaimRuleRegistry()
+	if evidence.ShouldUsePaymentClaimRules(claims, evidenceItems, failedQueries) {
+		registry = evidence.ClaimRuleRegistryWithPayment()
 	}
-	if evidence.ValidateAnswer(repaired, available).OK {
-		return repaired, nil
+	reports := make([]evidence.CoverageReport, 0, len(claims))
+	for _, claim := range claims {
+		reports = append(reports, registry.Match(claim, evidenceItems, failedQueries))
 	}
-	return conservativeEvidenceAnswer(available, validation.Reasons), nil
+	return evidence.ComposeAnswer(reports)
+}
+
+func evidenceFromTrace(steps []trace.AgentStep) ([]evidence.EvidenceItem, []evidence.FailedQuery) {
+	var items []evidence.EvidenceItem
+	var failed []evidence.FailedQuery
+	for _, step := range steps {
+		if step.Phase != "end" && step.Phase != "error" {
+			continue
+		}
+		for _, raw := range []string{step.Output, step.Error} {
+			if strings.TrimSpace(raw) == "" {
+				continue
+			}
+			env := evidence.Parse(raw).Envelope
+			if env.Status == evidence.StatusSuccess && env.CanUseAsEvidence && env.EvidenceID != "" && len(env.Observations) > 0 {
+				items = append(items, evidence.EvidenceItem{
+					EvidenceID:   env.EvidenceID,
+					ToolName:     step.Name,
+					Scope:        env.Scope,
+					Subject:      env.Subject,
+					Observations: env.Observations,
+					Summary:      env.Summary,
+				})
+			}
+			if env.FailedQueryID != "" {
+				failed = append(failed, evidence.FailedQuery{
+					FailedQueryID: env.FailedQueryID,
+					ToolName:      step.Name,
+					Status:        env.Status,
+					Summary:       env.Summary,
+				})
+			}
+		}
+	}
+	return items, failed
 }
 
 func evidenceIDsFromTrace(steps []trace.AgentStep) evidence.EvidenceSet {

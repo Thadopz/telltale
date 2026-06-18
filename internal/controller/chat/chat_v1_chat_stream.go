@@ -4,7 +4,6 @@ import (
 	v1 "SREagent/api/chat/v1"
 	"SREagent/internal/ai/agent/chat_pipeline"
 	"SREagent/internal/ai/agent/trace"
-	"SREagent/internal/authz"
 	"SREagent/utility/log_call_back"
 	"SREagent/utility/mem"
 	"context"
@@ -14,41 +13,19 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
 )
 
 func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (res *v1.ChatStreamRes, err error) {
-	userID, conversationID := resolveMemoryScope(req.Id, req.UserId, req.ConversationId)
-	principal := authz.PrincipalFromRequest(ctx, g.RequestFromCtx(ctx), userID)
-	ctx = authz.WithPrincipal(ctx, principal)
-	if principal.UserID != "" {
-		userID = principal.UserID
+	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question, req.KnowledgeMode)
+	if err != nil {
+		return nil, err
 	}
-	msg := req.Question
+	ctx = turn.Context
 
-	ctx = context.WithValue(ctx, "client_id", conversationID)
 	client, err := c.service.Create(ctx, g.RequestFromCtx(ctx))
 	if err != nil {
 		return nil, err
-	}
-
-	memory := mem.GetConversationMemory(userID, conversationID)
-	layers, err := mem.LoadContextLayers(ctx, userID, conversationID)
-	if err != nil {
-		client.SendToClient("error", err.Error())
-		return nil, err
-	}
-	userMessage := &chat_pipeline.UserMessage{
-		ID:             conversationID,
-		UserID:         userID,
-		ConversationID: conversationID,
-		Query:          msg,
-		History:        memory.GetContextMessages(mem.DefaultContextPolicy()),
-		Summary:        memory.GetSummary(),
-		SessionState:   layers.SessionState,
-		DurableMemory:  layers.DurableMemory,
-		ToolResults:    layers.ToolResults,
 	}
 
 	runner, err := chat_pipeline.BuildChatAgent(ctx)
@@ -58,12 +35,12 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 	}
 	recorder := trace.NewRecorder()
 	client.SendToClient("thinking", `{"message":"analyzing request"}`)
-	sr, err := runner.Stream(ctx, userMessage, compose.WithCallbacks(
+	sr, err := runner.Stream(ctx, turn.UserMessage, compose.WithCallbacks(
 		log_call_back.LogCallback(nil),
 		trace.StreamingCallback("chat_stream_agent", recorder, func(event string, step trace.AgentStep) {
 			client.SendToClient(event, marshalTraceStep(step))
 		}),
-		mem.ToolResultCallback(userID, conversationID),
+		mem.ToolResultCallback(turn.UserID, turn.ConversationID),
 	))
 	if err != nil {
 		client.SendToClient("error", err.Error())
@@ -73,41 +50,40 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 
 	var fullResponse strings.Builder
 
-	defer func() {
-		completeResponse := fullResponse.String()
-		if completeResponse != "" {
-			memory.SetMessages(schema.UserMessage(msg))
-			memory.SetMessages(schema.SystemMessage(completeResponse))
-			if stateErr := mem.UpdateSessionState(ctx, userID, conversationID, msg, completeResponse); stateErr != nil {
-				client.SendToClient("error", stateErr.Error())
-			}
-		}
-	}()
-
 	for {
 		chunk, err := sr.Recv()
 		if errors.Is(err, io.EOF) {
 			originalResponse := fullResponse.String()
-			guarded, guardErr := chat_pipeline.EnforceEvidenceAnswer(ctx, originalResponse, recorder.Steps())
+			guarded, guardErr := chat_pipeline.ConvergeAnswer(ctx, chat_pipeline.AnswerConvergeInput{
+				Question:     turn.Question,
+				Answer:       originalResponse,
+				Steps:        recorder.Steps(),
+				ToolEvidence: recorder.ToolEvidence(),
+			})
 			if guardErr != nil {
 				client.SendToClient("error", guardErr.Error())
-				return &v1.ChatStreamRes{}, nil
+				return nil, guardErr
 			}
 			if guarded != originalResponse {
-				fullResponse.Reset()
-				fullResponse.WriteString(guarded)
 				client.SendToClient("replace_message", marshalStreamContent(guarded))
 			}
+			// 只有完整生成并通过证据收敛的回答才能写入会话，避免后续对话读取半截内容。
+			if saveErr := saveCompletedTurn(ctx, turn, guarded); saveErr != nil {
+				client.SendToClient("error", saveErr.Error())
+				return nil, saveErr
+			}
+			client.SendToClient("final_message", marshalStreamContent(guarded))
+			client.SendToClient("message", guarded)
 			client.SendToClient("done", "Stream completed")
 			return &v1.ChatStreamRes{}, nil
 		}
 		if err != nil {
 			client.SendToClient("error", err.Error())
-			return &v1.ChatStreamRes{}, nil
+			return nil, err
 		}
 		fullResponse.WriteString(chunk.Content)
 		if chunk.Content != "" {
-			client.SendToClient("message", chunk.Content)
+			client.SendToClient("draft_message", chunk.Content)
 		}
 	}
 }
