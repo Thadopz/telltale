@@ -115,3 +115,34 @@ func TestLoadToolsWithTimeoutStopsWaitingForBlockedLoader(t *testing.T) {
 		t.Fatal("registration timeout did not stop waiting promptly")
 	}
 }
+
+func TestLoadSREGymEndpointsKeepsSuccessfulTools(t *testing.T) {
+	endpoints := []sregymEndpoint{
+		{Name: "failed", URL: "http://failed"},
+		{Name: "working", URL: "http://working"},
+	}
+	workingTool := &testInvokableTool{
+		name: "working_tool",
+		run: func(context.Context) (string, error) {
+			return "ok", nil
+		},
+	}
+
+	tools, err := loadSREGymEndpoints(context.Background(), endpoints, func(_ context.Context, endpoint sregymEndpoint) ([]tool.BaseTool, error) {
+		if endpoint.Name == "failed" {
+			return nil, errors.New("endpoint unavailable")
+		}
+		return []tool.BaseTool{workingTool}, nil
+	})
+
+	if err == nil {
+		t.Fatal("expected partial registration error")
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected one successfully registered tool, got %d", len(tools))
+	}
+	info, infoErr := tools[0].Info(context.Background())
+	if infoErr != nil || info.Name != "working_tool" {
+		t.Fatalf("unexpected registered tool: info=%#v err=%v", info, infoErr)
+	}
+}

@@ -82,6 +82,18 @@ tools:
     enabled: true
     required: false
     url: "https://mcp-api.tencent-cloud.com/sse/YOUR_MCP_INSTANCE_ID"
+  sregym:
+    enabled: false
+    required: true
+    register_submit: false
+    api_hostname: "localhost"
+    api_port: "8000"
+    mcp_server_port: "9954"
+    session_id: ""
+    kubectl_mcp_url: ""
+    prometheus_mcp_url: ""
+    jaeger_mcp_url: ""
+    submit_mcp_url: ""
 
 permissions:
   enabled: true
@@ -108,6 +120,14 @@ permissions:
         - "tool:mysql.read"
         - "tool:mysql.write"
         - "tool:payment.read"
+        - "tool:sregym"
+    sregym:
+      scopes:
+        - "tool:docs.read"
+        - "tool:time.read"
+        - "tool:metrics.read"
+        - "tool:logs.read"
+        - "tool:sregym"
 
 file_dir: "YOUR_KNOWLEDGE_DOCS_DIR"
 

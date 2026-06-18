@@ -4,6 +4,8 @@ import (
 	"SREagent/internal/authz"
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/gogf/gf/v2/frame/g"
@@ -38,6 +40,14 @@ func (r *Registry) chatTools(ctx context.Context) ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = appendSREGymLocalTools(ctx, &toolList); err != nil {
+		return nil, err
+	}
+	sregymTools, err := r.optionalSREGymMCPTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	toolList = appendUniqueTools(ctx, toolList, sregymTools)
 	if err = appendTool(ctx, &toolList, NewPrometheusAlertsQueryTool); err != nil {
 		return nil, err
 	}
@@ -64,6 +74,14 @@ func (r *Registry) aiOpsTools(ctx context.Context) ([]tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = appendSREGymLocalTools(ctx, &toolList); err != nil {
+		return nil, err
+	}
+	sregymTools, err := r.optionalSREGymMCPTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	toolList = appendUniqueTools(ctx, toolList, sregymTools)
 	if err = appendTool(ctx, &toolList, NewPrometheusAlertsQueryTool); err != nil {
 		return nil, err
 	}
@@ -114,6 +132,57 @@ func appendPaymentAgentTools(ctx context.Context, toolList *[]tool.BaseTool) err
 	return nil
 }
 
+func appendSREGymLocalTools(ctx context.Context, toolList *[]tool.BaseTool) error {
+	if !sregymLocalToolsEnabled(ctx) {
+		return nil
+	}
+	if !toolAllowedForRegistration(ctx, kubectlToolName, authz.PermSREGym) {
+		g.Log().Info(ctx, "local sregym kubectl tool hidden by permission policy")
+		return nil
+	}
+	return appendTool(ctx, toolList, NewSREGymKubectlTool)
+}
+
+func sregymLocalToolsEnabled(ctx context.Context) bool {
+	if configBool(ctx, "tools.sregym.enabled", false) {
+		return true
+	}
+	for _, role := range authz.PrincipalFromContext(ctx).Roles {
+		if role == "sregym" {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueTools(ctx context.Context, base []tool.BaseTool, additions []tool.BaseTool) []tool.BaseTool {
+	seen := map[string]struct{}{}
+	for _, candidate := range base {
+		if name := toolName(ctx, candidate); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, candidate := range additions {
+		name := toolName(ctx, candidate)
+		if name != "" {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
+		base = append(base, candidate)
+	}
+	return base
+}
+
+func toolName(ctx context.Context, candidate tool.BaseTool) string {
+	info, err := candidate.Info(ctx)
+	if err != nil || info == nil {
+		return ""
+	}
+	return info.Name
+}
+
 func (r *Registry) optionalLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
 	if !configBool(ctx, "tools.mcp_log.enabled", true) {
 		g.Log().Info(ctx, "mcp log tools disabled by config")
@@ -124,7 +193,7 @@ func (r *Registry) optionalLogMcpTools(ctx context.Context) ([]tool.BaseTool, er
 		return []tool.BaseTool{}, nil
 	}
 
-	toolList, err := GetLogMcpTool(ctx)
+	toolList, err := cachedLogMcpTools(ctx)
 	if err == nil {
 		return wrapMCPLogTools(toolList), nil
 	}
@@ -133,6 +202,43 @@ func (r *Registry) optionalLogMcpTools(ctx context.Context) ([]tool.BaseTool, er
 	}
 	g.Log().Warningf(ctx, "mcp log tools unavailable, continue without mcp log tools, err=%v", err)
 	return []tool.BaseTool{}, nil
+}
+
+var mcpLogCache = struct {
+	sync.Mutex
+	url     string
+	tools   []tool.BaseTool
+	err     error
+	expires time.Time
+}{}
+
+func cachedLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
+	url := getMCPLogURL(ctx)
+	now := time.Now()
+
+	mcpLogCache.Lock()
+	if mcpLogCache.url == url && now.Before(mcpLogCache.expires) {
+		tools := append([]tool.BaseTool(nil), mcpLogCache.tools...)
+		err := mcpLogCache.err
+		mcpLogCache.Unlock()
+		return tools, err
+	}
+	mcpLogCache.Unlock()
+
+	tools, err := GetLogMcpTool(ctx)
+	ttl := time.Minute
+	if err != nil {
+		ttl = 30 * time.Second
+	}
+
+	mcpLogCache.Lock()
+	mcpLogCache.url = url
+	mcpLogCache.tools = append([]tool.BaseTool(nil), tools...)
+	mcpLogCache.err = err
+	mcpLogCache.expires = now.Add(ttl)
+	mcpLogCache.Unlock()
+
+	return append([]tool.BaseTool(nil), tools...), err
 }
 
 func wrapMCPLogTools(toolList []tool.BaseTool) []tool.BaseTool {
