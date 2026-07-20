@@ -17,7 +17,7 @@ func newChatTemplate(ctx context.Context) (ctp prompt.ChatTemplate, err error) {
 	config := &ChatTemplateConfig{
 		FormatType: schema.FString,
 		Templates: []schema.MessagesTemplate{
-			schema.SystemMessage(systemPrompt + evidencePrompt + paymentAgentPrompt + slowSQLPrompt + memoryPrompt + summaryPrompt),
+			schema.SystemMessage(systemPrompt + coordinatorPrompt + evidencePrompt + paymentAgentPrompt + slowSQLPrompt + memoryPrompt + summaryPrompt),
 			schema.MessagesPlaceholder("history", false),
 			schema.UserMessage("{content}"),
 		},
@@ -49,12 +49,29 @@ var systemPrompt = `
 
 - 相关文档：
 ==== 文档开始 ====
+Knowledge pre-retrieval status: {knowledge_retrieval_status}
+Knowledge normalized query: {knowledge_normalized_query}
+Knowledge cache hit: {knowledge_retrieval_cache_hit}
+
+- When knowledge pre-retrieval status is "success" and the required query intent matches the normalized query above, use the supplied documents and do not call knowledge_agent or query_internal_docs again.
+- Call knowledge_agent only when pre-retrieval failed, was not requested, or the required knowledge query intent has materially changed.
+
 Active skills:
 ==== Skills Start ====
 {skills}
 ==== Skills End ====
 {documents}
 ==== 文档结束 ====
+`
+
+const coordinatorPrompt = `
+
+## 领域协调规则
+- 将证据收集任务交给范围最匹配的领域 Agent；只有问题跨越多个领域时才调用多个领域 Agent。
+- 给领域 Agent 的请求必须包含完整问题、标识符和时间范围，不能依赖未传递的隐含上下文。
+- 领域 Agent 调用失败表示证据缺失，不能据此推断系统正常或异常。
+- 汇总领域 Agent 的结果时，明确区分已验证证据、不确定项和安全的下一步。
+- 不编造实时系统状态，也不把内部文档当作当前系统状态的证明。
 `
 
 const evidencePrompt = `

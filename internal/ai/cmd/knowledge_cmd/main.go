@@ -3,10 +3,12 @@ package main
 import (
 	"SREagent/internal/ai/agent/knowledge_index_pipeline"
 	loader2 "SREagent/internal/ai/loader"
+	"SREagent/internal/appconfig"
 	"SREagent/utility/client"
 	"SREagent/utility/common"
 	"SREagent/utility/log_call_back"
 	"context"
+	"flag"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -17,12 +19,16 @@ import (
 )
 
 func main() {
+	docsDir := flag.String("docs", "docs", "directory containing markdown documents")
+	flag.Parse()
+
 	ctx := context.Background()
+	appconfig.Configure(ctx)
 	r, err := knowledge_index_pipeline.BuildKnowledgeIndexing(ctx)
 	if err != nil {
 		panic(err)
 	}
-	err = filepath.WalkDir("./docs", func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(*docsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walk dir failed: %w", err)
 		}

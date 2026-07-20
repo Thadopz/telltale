@@ -2,12 +2,14 @@ package main
 
 import (
 	"SREagent/internal/ai/agent/plan_execute_replan"
+	"SREagent/internal/appconfig"
 	"context"
 	"fmt"
 )
 
 func main() {
 	ctx := context.Background()
+	appconfig.Configure(ctx)
 	query := `
 "1. 你是一个智能的服务告警运维分析助手,首先调用工具query_prometheus_alerts获取所有活跃的告警。"
 "2. 分别根据告警的名称调用工具query_internal_docs，获取告警名对应的处理方案。"

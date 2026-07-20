@@ -5,12 +5,8 @@ import (
 	"os"
 	"strings"
 
-	e_mcp "github.com/cloudwego/eino-ext/components/tool/mcp"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/gogf/gf/v2/frame/g"
-
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
 )
 
 /*
@@ -27,29 +23,7 @@ func GetLogMcpTool(ctx context.Context) ([]tool.BaseTool, error) {
 }
 
 func loadLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
-	mcpUrl := getMCPLogURL(ctx)
-	cli, err := client.NewSSEMCPClient(mcpUrl)
-	if err != nil {
-		return []tool.BaseTool{}, err
-	}
-	err = cli.Start(ctx)
-	if err != nil {
-		return []tool.BaseTool{}, err
-	}
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "example-client",
-		Version: "1.0.0",
-	}
-	if _, err = cli.Initialize(ctx, initRequest); err != nil {
-		return []tool.BaseTool{}, err
-	}
-	mcpTools, err := e_mcp.GetTools(ctx, &e_mcp.Config{Cli: cli})
-	if err != nil {
-		return []tool.BaseTool{}, err
-	}
-	return mcpTools, nil
+	return loadStreamableHTTPMCPTools(ctx, getMCPLogURL(ctx), nil, "sreagent-log-client")
 }
 
 func getMCPLogURL(ctx context.Context) string {
@@ -66,5 +40,5 @@ func getMCPLogURL(ctx context.Context) string {
 	if url := strings.TrimSpace(os.Getenv("SUPERBIZ_MCP_LOG_URL")); url != "" {
 		return url
 	}
-	return "https://mcp-api.tencent-cloud.com/sse/YOUR_MCP_INSTANCE_ID"
+	return "https://YOUR_MCP_HOST/mcp"
 }

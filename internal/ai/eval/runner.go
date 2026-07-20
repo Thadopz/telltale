@@ -3,7 +3,9 @@ package eval
 import (
 	"SREagent/internal/ai/agent/chat_pipeline"
 	"SREagent/internal/ai/agent/trace"
+	"SREagent/internal/authz"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -41,6 +43,9 @@ func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseRes
 func RunCase(ctx context.Context, c Case, opts RunOptions) (EvalCaseResult, error) {
 	started := time.Now()
 	conversationID := fmt.Sprintf("eval-%s-%s", sanitizeID(c.ID), opts.RunID)
+	if opts.Mode == ModeSmoke {
+		ctx = authz.WithPrincipal(ctx, authz.Principal{UserID: "eval", Roles: []string{"oncall"}})
+	}
 	userMessage := &chat_pipeline.UserMessage{
 		ID:             conversationID,
 		UserID:         "eval",
@@ -88,7 +93,7 @@ func RunCase(ctx context.Context, c Case, opts RunOptions) (EvalCaseResult, erro
 		agentOpts.Retriever = fakeRetriever{docs: c.MockContext.Documents}
 		agentOpts.Tools = fakeTools(c)
 		agentOpts.SkipRerank = true
-		agentOpts.ReactMaxStep = 8
+		agentOpts.MaxIterations = 8
 	}
 
 	runner, err := chat_pipeline.BuildChatAgentWithOptions(ctx, agentOpts)
@@ -162,11 +167,13 @@ func toolEvidenceFromTrace(steps []trace.AgentStep) []ToolEvidence {
 			starts[key] = step
 		case "end":
 			start := starts[key]
+			status, outputError := toolOutputStatus(step.Output)
 			tools = append(tools, ToolEvidence{
 				Name:    step.Name,
 				Input:   start.Input,
 				Output:  step.Output,
-				Status:  "success",
+				Status:  status,
+				Error:   outputError,
 				Elapsed: step.ElapsedMS,
 			})
 		case "error":
@@ -180,6 +187,27 @@ func toolEvidenceFromTrace(steps []trace.AgentStep) []ToolEvidence {
 		}
 	}
 	return tools
+}
+
+func toolOutputStatus(output string) (string, string) {
+	normalizedOutput := strings.TrimSpace(output)
+	var decodedOutput string
+	if json.Unmarshal([]byte(normalizedOutput), &decodedOutput) == nil {
+		normalizedOutput = decodedOutput
+	}
+
+	var envelope struct {
+		Success *bool  `json:"success"`
+		Status  string `json:"status"`
+		Error   string `json:"error"`
+	}
+	if json.Unmarshal([]byte(normalizedOutput), &envelope) != nil {
+		return "success", ""
+	}
+	if (envelope.Success != nil && !*envelope.Success) || strings.EqualFold(envelope.Status, "error") {
+		return "error", envelope.Error
+	}
+	return "success", ""
 }
 
 func sanitizeID(s string) string {

@@ -1,6 +1,7 @@
 package chat_pipeline
 
 import (
+	"SREagent/internal/ai/knowledge"
 	"SREagent/internal/ai/project_context"
 	"SREagent/internal/ai/skills"
 	"context"
@@ -30,56 +31,38 @@ func newContextDocumentsLambdaWithOptions(agentOpts ChatAgentOptions) func(conte
 		modelContext := modelContextForInput(ctx, input)
 		if !modelContext.UseKnowledge {
 			emitRetrieval(ctx, agentOpts, RetrievalObservation{Triggered: false, Query: modelContext.KnowledgeQuery})
-			return documentsOutput(nil), nil
+			return documentsOutput(nil, "not_requested", knowledge.NormalizeQuery(modelContext.KnowledgeQuery), false), nil
 		}
 
-		r := agentOpts.Retriever
-		if r == nil {
-			r, err = newRetriever(ctx)
-			if err != nil {
-				g.Log().Warningf(ctx, "context knowledge retriever unavailable, err=%v", err)
-				emitRetrieval(ctx, agentOpts, RetrievalObservation{Triggered: true, Query: modelContext.KnowledgeQuery, Error: err.Error()})
-				return documentsOutput(knowledgeFailureDocuments("knowledge retriever unavailable", err)), nil
-			}
-		}
-
-		docs, err := r.Retrieve(ctx, modelContext.KnowledgeQuery)
+		result, err := knowledge.DefaultService().Search(ctx, knowledge.SearchRequest{
+			SessionID:  knowledgeSessionID(ctx, input),
+			Query:      modelContext.KnowledgeQuery,
+			Retriever:  agentOpts.Retriever,
+			SkipRerank: agentOpts.SkipRerank,
+		})
 		if err != nil {
 			g.Log().Warningf(ctx, "context knowledge retrieval failed, err=%v", err)
 			emitRetrieval(ctx, agentOpts, RetrievalObservation{Triggered: true, Query: modelContext.KnowledgeQuery, Error: err.Error()})
-			return documentsOutput(knowledgeFailureDocuments("knowledge retrieval failed", err)), nil
+			return documentsOutput(knowledgeFailureDocuments("knowledge retrieval failed", err), "failed", knowledge.NormalizeQuery(modelContext.KnowledgeQuery), false), nil
 		}
 
-		finalDocs := docs
-		stage := "retrieved"
-		var rerankErr error
-		if !agentOpts.SkipRerank {
-			reranked, err := rerankDocumentsLambda(ctx, map[string]any{
-				"query":     modelContext.KnowledgeQuery,
-				"documents": docs,
-			})
-			if err != nil {
-				g.Log().Warningf(ctx, "context knowledge rerank failed, err=%v", err)
-				rerankErr = err
-			} else {
-				finalDocs = toDocuments(reranked["documents"])
-				if rawErr := toString(reranked["rerank_error"]); rawErr != "" {
-					rerankErr = fmt.Errorf("%s", rawErr)
-				}
-				stage = "reranked"
-			}
+		budgeted := budgetDocuments(result.Documents, agentOpts.documentsMax(), agentOpts.documentMax())
+		if result.RerankError != nil {
+			budgeted = append(budgeted, knowledgeFailureDocuments("knowledge rerank failed; using original retrieval order", result.RerankError)...)
 		}
-
-		budgeted := budgetDocuments(finalDocs, agentOpts.documentsMax(), agentOpts.documentMax())
-		if rerankErr != nil {
-			budgeted = append(budgeted, knowledgeFailureDocuments("knowledge rerank failed; using original retrieval order", rerankErr)...)
+		stage := "reranked"
+		if agentOpts.SkipRerank {
+			stage = "retrieved"
+		}
+		if result.FromCache {
+			stage = "cache"
 		}
 		emitRetrieval(ctx, agentOpts, RetrievalObservation{
 			Triggered: true,
 			Query:     modelContext.KnowledgeQuery,
 			Docs:      documentEvidence(budgeted, stage),
 		})
-		return documentsOutput(budgeted), nil
+		return documentsOutput(budgeted, "success", result.NormalizedQuery, result.FromCache), nil
 	}
 }
 
@@ -102,11 +85,26 @@ func modelContextPtr(modelContext ModelContext) *ModelContext {
 	return &modelContext
 }
 
-func documentsOutput(docs []*schema.Document) map[string]any {
+func documentsOutput(docs []*schema.Document, status string, normalizedQuery string, cacheHit bool) map[string]any {
 	if docs == nil {
 		docs = []*schema.Document{}
 	}
-	return map[string]any{"documents": docs}
+	return map[string]any{
+		"documents":                     docs,
+		"knowledge_retrieval_status":    status,
+		"knowledge_normalized_query":    normalizedQuery,
+		"knowledge_retrieval_cache_hit": cacheHit,
+	}
+}
+
+func knowledgeSessionID(ctx context.Context, input *UserMessage) string {
+	if input != nil && input.ConversationID != "" {
+		return input.ConversationID
+	}
+	if sessionID, ok := ctx.Value("client_id").(string); ok {
+		return sessionID
+	}
+	return ""
 }
 
 func knowledgeFailureDocuments(message string, err error) []*schema.Document {

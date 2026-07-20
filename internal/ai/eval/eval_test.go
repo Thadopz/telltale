@@ -40,6 +40,29 @@ func TestScoreCaseDetectsFailures(t *testing.T) {
 	}
 }
 
+func TestScoreCaseAcceptsAnyConfiguredPhrase(t *testing.T) {
+	c := Case{
+		Expected: Expected{
+			AnswerContainsAny: []string{"hello", "你好"},
+		},
+	}
+	result := EvalCaseResult{Answer: "你好，我可以帮你排查问题"}
+
+	score := ScoreCase(c, result)
+
+	if !score.Pass {
+		t.Fatalf("expected one acceptable phrase to pass, got %v", score.Reasons)
+	}
+}
+
+func TestToolOutputStatusDetectsBusinessError(t *testing.T) {
+	status, errorMessage := toolOutputStatus(`"{\"success\":false,\"status\":\"error\",\"error\":\"backend unavailable\"}"`)
+
+	if status != "error" || errorMessage != "backend unavailable" {
+		t.Fatalf("expected business error, got status=%q error=%q", status, errorMessage)
+	}
+}
+
 func TestRunCaseMockCollectsEvidenceAndScores(t *testing.T) {
 	useKnowledge := true
 	c := Case{

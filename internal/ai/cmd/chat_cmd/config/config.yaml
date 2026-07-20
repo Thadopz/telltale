@@ -9,6 +9,24 @@ logger:
   level: "all"
   stdout: true
 
+observability:
+  enabled: false
+  service_name: "sreagent"
+  otlp_endpoint: "localhost:4317"
+  insecure: true
+  trace_sample_ratio: 1.0
+  metric_interval_seconds: 15
+
+agent:
+  invoke_model_retries: 1
+  domain_agents:
+    enabled: true
+  failover:
+    enabled: false
+  tool_search:
+    enabled: true
+    min_tools: 8
+
 database:
   default:
     type: "mysql"
@@ -30,6 +48,12 @@ quick_chat_model:
   base_url: "YOUR_CHAT_API_BASE_URL"
   model: "FAST_CHAT_MODEL"
 
+failover_chat_model:
+  description: "backup chat model used when the primary model is unavailable"
+  api_key: "YOUR_FAILOVER_CHAT_API_KEY"
+  base_url: "YOUR_FAILOVER_CHAT_API_BASE_URL"
+  model: "FAILOVER_CHAT_MODEL"
+
 embedding_model:
   description: "multimodal embedding model for knowledge retrieval"
   api_key: "YOUR_EMBEDDING_API_KEY"
@@ -44,10 +68,16 @@ rerank:
 
 milvus:
   address: "YOUR_MILVUS_ADDRESS"
-  collection: "YOUR_MILVUS_COLLECTION"
-  vector_dim: 36864
+  db_name: "agent"
+  collection: "biz_hybrid_v1"
+  dense_dimension: 1152
+  bm25_analyzer: "standard"
 
 knowledge_retrieval:
+  hybrid_candidates: 12
+  rrf_k: 60
+  cache_ttl_seconds: 120
+  cache_max_entries: 256
   auto_keywords:
     - nacos
     - rocketmq
@@ -74,7 +104,7 @@ tools:
   mcp_log:
     enabled: true
     required: false
-    url: "https://mcp-api.tencent-cloud.com/sse/YOUR_MCP_INSTANCE_ID"
+    url: "https://YOUR_MCP_HOST/mcp"
 
 permissions:
   enabled: true
@@ -104,4 +134,4 @@ permissions:
 
 file_dir: "YOUR_KNOWLEDGE_DOCS_DIR"
 
-mcp_url: "https://mcp-api.tencent-cloud.com/sse/YOUR_MCP_INSTANCE_ID"
+mcp_url: "https://YOUR_MCP_HOST/mcp"

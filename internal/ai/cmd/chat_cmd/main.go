@@ -2,6 +2,7 @@ package main
 
 import (
 	"SREagent/internal/ai/agent/chat_pipeline"
+	"SREagent/internal/appconfig"
 	"SREagent/utility/mem"
 	"context"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	appconfig.Configure(ctx)
 	id := "111"
 	userMessage := &chat_pipeline.UserMessage{
 		ID:      id,

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"SREagent/internal/appconfig"
 	"SREagent/internal/controller/chat"
+	"SREagent/internal/observability"
 	"SREagent/utility/client"
 	"SREagent/utility/common"
 	"SREagent/utility/middleware"
+	"context"
+	"time"
 
 	_ "github.com/gogf/gf/contrib/drivers/mysql/v2"
 	"github.com/gogf/gf/v2/frame/g"
@@ -14,7 +18,18 @@ import (
 
 func main() {
 	ctx := gctx.New()
-	configureAppConfig(ctx)
+	appconfig.Configure(ctx)
+	shutdownObservability, err := observability.Init(ctx)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := shutdownObservability(shutdownCtx); shutdownErr != nil {
+			g.Log().Errorf(ctx, "shutdown OpenTelemetry: %v", shutdownErr)
+		}
+	}()
 	fileDir, err := g.Cfg().Get(ctx, "file_dir")
 	if err != nil {
 		panic(err)

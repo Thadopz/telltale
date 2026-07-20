@@ -4,6 +4,7 @@ import (
 	v1 "SREagent/api/chat/v1"
 	"SREagent/internal/ai/agent/chat_pipeline"
 	"SREagent/internal/ai/agent/trace"
+	"SREagent/internal/observability"
 	"SREagent/utility/log_call_back"
 	"SREagent/utility/mem"
 	"context"
@@ -11,12 +12,31 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/gogf/gf/v2/frame/g"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (res *v1.ChatStreamRes, err error) {
+	startedAt := time.Now()
+	if httpRequest := g.RequestFromCtx(ctx); httpRequest != nil {
+		ctx = observability.ExtractHTTPContext(ctx, httpRequest.Header)
+	}
+	ctx, span := observability.StartSpan(ctx, "chat.request", attribute.Bool("chat.stream", true))
+	answerLength := 0
+	var recorder *trace.Recorder
+	defer func() {
+		evidenceCount, failedToolCount := recorder.QualityCounts()
+		observability.RecordChat(ctx, true, time.Since(startedAt), err, answerLength, evidenceCount, failedToolCount)
+		observability.EndSpan(span, err,
+			attribute.Int("chat.answer.characters", answerLength),
+			attribute.Int("chat.evidence.items", evidenceCount),
+			attribute.Int("chat.tool.failures", failedToolCount),
+		)
+	}()
+
 	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question, req.KnowledgeMode)
 	if err != nil {
 		return nil, err
@@ -33,7 +53,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 		client.SendToClient("error", err.Error())
 		return nil, err
 	}
-	recorder := trace.NewRecorder()
+	recorder = trace.NewRecorder()
 	client.SendToClient("thinking", `{"message":"analyzing request"}`)
 	sr, err := runner.Stream(ctx, turn.UserMessage, compose.WithCallbacks(
 		log_call_back.LogCallback(nil),
@@ -49,6 +69,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 	defer sr.Close()
 
 	var fullResponse strings.Builder
+	firstTokenRecorded := false
 
 	for {
 		chunk, err := sr.Recv()
@@ -72,6 +93,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 				client.SendToClient("error", saveErr.Error())
 				return nil, saveErr
 			}
+			answerLength = len([]rune(guarded))
 			client.SendToClient("final_message", marshalStreamContent(guarded))
 			client.SendToClient("message", guarded)
 			client.SendToClient("done", "Stream completed")
@@ -83,6 +105,10 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 		}
 		fullResponse.WriteString(chunk.Content)
 		if chunk.Content != "" {
+			if !firstTokenRecorded {
+				observability.RecordFirstToken(ctx, time.Since(startedAt))
+				firstTokenRecorded = true
+			}
 			client.SendToClient("draft_message", chunk.Content)
 		}
 	}

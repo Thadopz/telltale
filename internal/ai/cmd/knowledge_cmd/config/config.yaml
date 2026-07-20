@@ -32,9 +32,11 @@ embedding_model:
 
 milvus:
   address: "YOUR_MILVUS_ADDRESS"
-  collection: "YOUR_MILVUS_COLLECTION"
-  vector_dim: 36864
+  db_name: "agent"
+  collection: "biz_hybrid_v1"
+  dense_dimension: 1152
+  bm25_analyzer: "standard"
 
 file_dir: "YOUR_KNOWLEDGE_DOCS_DIR"
 
-mcp_url: "https://mcp-api.tencent-cloud.com/sse/XXXX"
+mcp_url: "https://YOUR_MCP_HOST/mcp"

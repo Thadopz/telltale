@@ -2,6 +2,8 @@ package models
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
@@ -56,4 +58,44 @@ func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatMode
 		return nil, err
 	}
 	return cm, nil
+}
+
+func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) {
+	modelName, err := requiredModelConfig(ctx, "failover_chat_model.model")
+	if err != nil {
+		return nil, err
+	}
+	apiKey, err := requiredModelConfig(ctx, "failover_chat_model.api_key")
+	if err != nil {
+		return nil, err
+	}
+	baseURL, err := requiredModelConfig(ctx, "failover_chat_model.base_url")
+	if err != nil {
+		return nil, err
+	}
+
+	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+		Model:   modelName,
+		APIKey:  apiKey,
+		BaseURL: baseURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create failover chat model: %w", err)
+	}
+	return chatModel, nil
+}
+
+func requiredModelConfig(ctx context.Context, key string) (string, error) {
+	value, err := g.Cfg().Get(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", key, err)
+	}
+	if value == nil {
+		return "", fmt.Errorf("%s is empty", key)
+	}
+	configuredValue := strings.TrimSpace(value.String())
+	if configuredValue == "" {
+		return "", fmt.Errorf("%s is empty", key)
+	}
+	return configuredValue, nil
 }

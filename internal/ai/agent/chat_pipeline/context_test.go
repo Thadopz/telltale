@@ -237,6 +237,47 @@ func TestContextDocumentsReportsKnowledgeRetrievalFailure(t *testing.T) {
 	}
 }
 
+func TestContextDocumentsReusesSuccessfulNormalizedQueryInSameConversation(t *testing.T) {
+	searcher := &countingContextRetriever{documents: []*schema.Document{{Content: "payment runbook"}}}
+	conversationID := "context-cache-" + t.Name()
+
+	firstInput := &UserMessage{
+		ConversationID: conversationID,
+		ModelContext: &ModelContext{
+			Content:        "Payment RUNBOOK",
+			KnowledgeQuery: "  Payment\nRUNBOOK ",
+			UseKnowledge:   true,
+		},
+	}
+	first, err := newContextDocumentsLambdaWithOptions(ChatAgentOptions{Retriever: searcher, SkipRerank: true})(context.Background(), firstInput)
+	if err != nil {
+		t.Fatalf("first pre-retrieval: %v", err)
+	}
+	if first["knowledge_retrieval_status"] != "success" {
+		t.Fatalf("expected successful pre-retrieval status, got %#v", first)
+	}
+
+	secondInput := &UserMessage{
+		ConversationID: conversationID,
+		ModelContext: &ModelContext{
+			Content:        "payment runbook",
+			KnowledgeQuery: "payment runbook",
+			UseKnowledge:   true,
+		},
+	}
+	second, err := newContextDocumentsLambdaWithOptions(ChatAgentOptions{Retriever: searcher, SkipRerank: true})(context.Background(), secondInput)
+	if err != nil {
+		t.Fatalf("second pre-retrieval: %v", err)
+	}
+
+	if searcher.calls != 1 {
+		t.Fatalf("expected one Milvus retrieval for equivalent normalized queries, got %d", searcher.calls)
+	}
+	if second["knowledge_retrieval_cache_hit"] != true {
+		t.Fatalf("expected second pre-retrieval to use cache, got %#v", second)
+	}
+}
+
 func TestPreparedModelContextIsReused(t *testing.T) {
 	modelContext := ModelContext{
 		Content:         "cached content",
@@ -291,6 +332,16 @@ func TestChatAgentFactoryCacheKeySeparatesRoles(t *testing.T) {
 
 type failingRetriever struct {
 	err error
+}
+
+type countingContextRetriever struct {
+	calls     int
+	documents []*schema.Document
+}
+
+func (r *countingContextRetriever) Retrieve(context.Context, string, ...retriever.Option) ([]*schema.Document, error) {
+	r.calls++
+	return r.documents, nil
 }
 
 func (r failingRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {

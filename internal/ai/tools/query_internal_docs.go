@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"SREagent/internal/ai/retriever"
+	"SREagent/internal/ai/knowledge"
 	"context"
 	"fmt"
 
@@ -16,23 +16,33 @@ type QueryInternalDocsInput struct {
 func NewQueryInternalDocsTool() (tool.InvokableTool, error) {
 	t, err := utils.InferOptionableTool(
 		"query_internal_docs",
-		"Use this tool to search internal documentation and knowledge base for relevant information. It performs RAG (Retrieval-Augmented Generation) to find similar documents and extract processing steps. This is useful when you need to understand internal procedures, best practices, or step-by-step guides stored in the company's documentation.",
+		"Search internal documentation through the shared Dense + BM25 + RRF + reranker pipeline. Do not call this tool when the current prompt says knowledge pre-retrieval succeeded for the same normalized query intent.",
 		func(ctx context.Context, input *QueryInternalDocsInput, opts ...tool.Option) (output string, err error) {
-			rr, err := retriever.NewMilvusRetriever(ctx)
-			if err != nil {
-				return marshalToolError(err, "create milvus retriever failed"), nil
-			}
-			resp, err := rr.Retrieve(ctx, input.Query)
+			result, err := knowledge.DefaultService().Search(ctx, knowledge.SearchRequest{
+				SessionID: knowledgeToolSessionID(ctx),
+				Query:     input.Query,
+			})
 			if err != nil {
 				return marshalToolError(err, "retrieve internal docs failed"), nil
 			}
-			if resp == nil {
+			if len(result.Documents) == 0 {
 				return marshalToolData([]any{}, "no related internal docs found"), nil
 			}
-			return marshalToolData(resp, fmt.Sprintf("retrieved %d internal docs", len(resp))), nil
+			message := fmt.Sprintf("retrieved %d internal docs", len(result.Documents))
+			if result.FromCache {
+				message += " from the session query cache"
+			}
+			return marshalToolData(result.Documents, message), nil
 		})
 	if err != nil {
 		return nil, err
 	}
 	return t, nil
+}
+
+func knowledgeToolSessionID(ctx context.Context) string {
+	if sessionID, ok := ctx.Value("client_id").(string); ok {
+		return sessionID
+	}
+	return ""
 }

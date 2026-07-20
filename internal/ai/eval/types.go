@@ -35,12 +35,15 @@ type ToolFixture struct {
 }
 
 type Expected struct {
-	UseKnowledge      *bool    `json:"use_knowledge,omitempty"`
-	Tools             []string `json:"tools,omitempty"`
-	NotTools          []string `json:"not_tools,omitempty"`
-	AnswerContains    []string `json:"answer_contains,omitempty"`
-	AnswerNotContains []string `json:"answer_not_contains,omitempty"`
-	EvidenceContains  []string `json:"evidence_contains,omitempty"`
+	UseKnowledge        *bool    `json:"use_knowledge,omitempty"`
+	Tools               []string `json:"tools,omitempty"`
+	NotTools            []string `json:"not_tools,omitempty"`
+	AnswerContains      []string `json:"answer_contains,omitempty"`
+	AnswerContainsAny   []string `json:"answer_contains_any,omitempty"`
+	AnswerNotContains   []string `json:"answer_not_contains,omitempty"`
+	EvidenceContains    []string `json:"evidence_contains,omitempty"`
+	EvidenceContainsAny []string `json:"evidence_contains_any,omitempty"`
+	MinRetrievedDocs    int      `json:"min_retrieved_docs,omitempty"`
 }
 
 type Case struct {

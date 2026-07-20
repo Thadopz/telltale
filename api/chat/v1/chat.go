@@ -91,3 +91,66 @@ type ActionExecuteRes struct {
 	ArgumentsHash string `json:"arguments_hash"`
 	Output        string `json:"output"`
 }
+
+type MemoryItem struct {
+	ID                   int64   `json:"id"`
+	MemoryKey            string  `json:"memory_key"`
+	Kind                 string  `json:"kind"`
+	Content              string  `json:"content"`
+	Confidence           float64 `json:"confidence"`
+	Status               string  `json:"status"`
+	VectorStatus         string  `json:"vector_status"`
+	SourceConversationID string  `json:"source_conversation_id"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+type MemoryCandidateItem struct {
+	ID                   int64   `json:"id"`
+	MemoryKey            string  `json:"memory_key"`
+	Kind                 string  `json:"kind"`
+	Content              string  `json:"content"`
+	Confidence           float64 `json:"confidence"`
+	SourceConversationID string  `json:"source_conversation_id"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+type MemoryListReq struct {
+	g.Meta `path:"/memories" method:"get" summary:"List durable memories"`
+}
+
+type MemoryListRes struct {
+	Items []MemoryItem `json:"items"`
+}
+
+type MemoryDeleteReq struct {
+	g.Meta   `path:"/memories/{MemoryId}" method:"delete" summary:"Delete durable memory"`
+	MemoryId int64 `in:"path" json:"memoryId"`
+}
+
+type MemoryDeleteRes struct{}
+
+type MemoryCandidateListReq struct {
+	g.Meta `path:"/memory_candidates" method:"get" summary:"List pending durable memory candidates"`
+}
+
+type MemoryCandidateListRes struct {
+	Items []MemoryCandidateItem `json:"items"`
+}
+
+type MemoryCandidateConfirmReq struct {
+	g.Meta      `path:"/memory_candidates/{CandidateId}/confirm" method:"post" summary:"Confirm durable memory candidate"`
+	CandidateId int64 `in:"path" json:"candidateId"`
+}
+
+type MemoryCandidateConfirmRes struct {
+	Memory MemoryItem `json:"memory"`
+}
+
+type MemoryCandidateRejectReq struct {
+	g.Meta      `path:"/memory_candidates/{CandidateId}/reject" method:"post" summary:"Reject durable memory candidate"`
+	CandidateId int64 `in:"path" json:"candidateId"`
+}
+
+type MemoryCandidateRejectRes struct{}

@@ -13,10 +13,26 @@ import (
 
 type Scenario string
 
+type Domain string
+
 const (
 	ScenarioChat  Scenario = "chat"
 	ScenarioAIOps Scenario = "aiops"
+
+	DomainGeneral       Domain = "general"
+	DomainObservability Domain = "observability"
+	DomainDatabase      Domain = "database"
+	DomainPayment       Domain = "payment"
+	DomainKnowledge     Domain = "knowledge"
 )
+
+// DomainToolSet keeps tools in stable business boundaries. Callers can expose
+// each set through a dedicated agent without teaching the registry about agent
+// orchestration.
+type DomainToolSet struct {
+	Domain Domain
+	Tools  []tool.BaseTool
+}
 
 type Registry struct{}
 
@@ -36,37 +52,68 @@ func (r *Registry) ToolsFor(ctx context.Context, scenario Scenario) ([]tool.Base
 }
 
 func (r *Registry) chatTools(ctx context.Context) ([]tool.BaseTool, error) {
-	toolList, err := r.optionalLogMcpTools(ctx)
+	sets, err := r.ChatDomainTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err = appendSREGymLocalTools(ctx, &toolList); err != nil {
+
+	var toolList []tool.BaseTool
+	for _, set := range sets {
+		toolList = append(toolList, set.Tools...)
+	}
+	return toolList, nil
+}
+
+// ChatDomainTools returns permission-filtered tools grouped by domain in a
+// deterministic order. Empty groups are retained so configuration and tests
+// can reason about the complete domain model.
+func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error) {
+	observabilityTools, err := r.optionalLogMcpTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err = appendSREGymLocalTools(ctx, &observabilityTools); err != nil {
 		return nil, err
 	}
 	sregymTools, err := r.optionalSREGymMCPTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-	toolList = appendUniqueTools(ctx, toolList, sregymTools)
-	if err = appendTool(ctx, &toolList, NewPrometheusAlertsQueryTool); err != nil {
+	observabilityTools = appendUniqueTools(ctx, observabilityTools, sregymTools)
+	if err = appendTool(ctx, &observabilityTools, NewPrometheusAlertsQueryTool); err != nil {
 		return nil, err
 	}
-	if err = appendTool(ctx, &toolList, NewMysqlCrudTool); err != nil {
+
+	var databaseTools []tool.BaseTool
+	if err = appendTool(ctx, &databaseTools, NewMysqlCrudTool); err != nil {
 		return nil, err
 	}
-	if err = appendTool(ctx, &toolList, NewMysqlSlowSQLTool); err != nil {
+	if err = appendTool(ctx, &databaseTools, NewMysqlSlowSQLTool); err != nil {
 		return nil, err
 	}
-	if err = appendPaymentAgentTools(ctx, &toolList); err != nil {
+
+	var paymentTools []tool.BaseTool
+	if err = appendPaymentAgentTools(ctx, &paymentTools); err != nil {
 		return nil, err
 	}
-	if err = appendTool(ctx, &toolList, NewGetCurrentTimeTool); err != nil {
+
+	var generalTools []tool.BaseTool
+	if err = appendTool(ctx, &generalTools, NewGetCurrentTimeTool); err != nil {
 		return nil, err
 	}
-	if err = appendTool(ctx, &toolList, NewQueryInternalDocsTool); err != nil {
+
+	var knowledgeTools []tool.BaseTool
+	if err = appendTool(ctx, &knowledgeTools, NewQueryInternalDocsTool); err != nil {
 		return nil, err
 	}
-	return toolList, nil
+
+	return []DomainToolSet{
+		{Domain: DomainGeneral, Tools: generalTools},
+		{Domain: DomainObservability, Tools: observabilityTools},
+		{Domain: DomainDatabase, Tools: databaseTools},
+		{Domain: DomainPayment, Tools: paymentTools},
+		{Domain: DomainKnowledge, Tools: knowledgeTools},
+	}, nil
 }
 
 func (r *Registry) aiOpsTools(ctx context.Context) ([]tool.BaseTool, error) {

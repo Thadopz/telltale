@@ -100,6 +100,9 @@ func saveCompletedTurn(ctx context.Context, turn *preparedChatTurn, answer strin
 	if err := mem.UpdateSessionState(ctx, turn.UserID, turn.ConversationID, turn.Question, answer); err != nil {
 		return fmt.Errorf("update chat session state: %w", err)
 	}
+	if err := mem.ExtractAndSaveDurableMemories(ctx, turn.UserID, turn.ConversationID, turn.Question, answer); err != nil {
+		g.Log().Warningf(ctx, "durable memory extraction failed user_id=%s conversation_id=%s err=%v", turn.UserID, turn.ConversationID, err)
+	}
 	return nil
 }
 

@@ -271,10 +271,12 @@ func TestMySQLMemoryStorePersistsMessagesAndSummary(t *testing.T) {
 		t.Fatalf("update mysql session state: %v", err)
 	}
 	if _, err = g.DB().Model("durable_memories").Data(g.Map{
-		"user_id": id,
-		"kind":    "preference",
-		"content": "keep incident summaries short",
-		"status":  "active",
+		"user_id":       id,
+		"memory_key":    "preference.answer_detail",
+		"kind":          "preference",
+		"content":       "keep incident summaries short",
+		"status":        "active",
+		"vector_status": "pending",
 	}).Insert(); err != nil {
 		t.Fatalf("insert durable memory fixture: %v", err)
 	}

@@ -17,7 +17,7 @@ func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r co
 		PrepareContext   = "PrepareContext"
 		ContextDocuments = "ContextDocuments"
 		ChatTemplate     = "ChatTemplate"
-		ReactAgent       = "ReactAgent"
+		ADKAgent         = "ADKAgent"
 		InputToChat      = "InputToChat"
 	)
 
@@ -37,12 +37,12 @@ func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r co
 		return nil, fmt.Errorf("add chat template node: %w", err)
 	}
 
-	reactAgent, err := newReactAgentLambdaWithOptions(ctx, opts)
+	adkAgent, err := newADKAgentLambdaWithOptions(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if err = g.AddLambdaNode(ReactAgent, reactAgent, compose.WithNodeName("ReActAgent")); err != nil {
-		return nil, fmt.Errorf("add ReAct agent node: %w", err)
+	if err = g.AddLambdaNode(ADKAgent, adkAgent, compose.WithNodeName("ADKChatModelAgent")); err != nil {
+		return nil, fmt.Errorf("add ADK agent node: %w", err)
 	}
 	if err = g.AddLambdaNode(InputToChat, compose.InvokableLambdaWithOption(newInputToChatLambda), compose.WithNodeName("UserMessageToChat")); err != nil {
 		return nil, fmt.Errorf("add chat input node: %w", err)
@@ -54,8 +54,8 @@ func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r co
 		{PrepareContext, InputToChat},
 		{ContextDocuments, ChatTemplate},
 		{InputToChat, ChatTemplate},
-		{ChatTemplate, ReactAgent},
-		{ReactAgent, compose.END},
+		{ChatTemplate, ADKAgent},
+		{ADKAgent, compose.END},
 	}
 	for _, edge := range edges {
 		if err = g.AddEdge(edge[0], edge[1]); err != nil {

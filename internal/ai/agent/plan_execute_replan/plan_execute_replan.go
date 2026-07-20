@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cloudwego/eino-examples/adk/common/prints"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
 )
@@ -43,8 +42,6 @@ func BuildPlanAgent(ctx context.Context, query string) (string, []string, error)
 		if !ok {
 			break
 		}
-		fmt.Println("------------- Event -------------")
-		prints.Event(event)
 		if event.Output != nil {
 			lastMessage, _, err = adk.GetMessage(event)
 			if err != nil {

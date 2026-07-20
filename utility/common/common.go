@@ -2,7 +2,6 @@ package common
 
 import (
 	"context"
-	"strconv"
 	"strings"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -10,8 +9,7 @@ import (
 
 const (
 	MilvusDBName         = "agent"
-	MilvusCollectionName = "biz"
-	MilvusVectorDim      = 65536
+	MilvusCollectionName = "biz_hybrid_v1"
 )
 
 var FileDir = "./docs/"
@@ -28,6 +26,26 @@ func MilvusDB(ctx context.Context) string {
 	return dbName
 }
 
+func MilvusDenseVectorDim(ctx context.Context) int {
+	value, err := g.Cfg().Get(ctx, "milvus.dense_dimension")
+	if err == nil && value != nil && value.Int() > 0 {
+		return value.Int()
+	}
+	value, err = g.Cfg().Get(ctx, "embedding_model.dimension")
+	if err == nil && value != nil && value.Int() > 0 {
+		return value.Int()
+	}
+	return 2048
+}
+
+func MilvusBM25Analyzer(ctx context.Context) string {
+	value, err := g.Cfg().Get(ctx, "milvus.bm25_analyzer")
+	if err != nil || value == nil || strings.TrimSpace(value.String()) == "" {
+		return "standard"
+	}
+	return strings.TrimSpace(value.String())
+}
+
 func MilvusCollection(ctx context.Context) string {
 	v, err := g.Cfg().Get(ctx, "milvus.collection")
 	if err != nil {
@@ -38,16 +56,4 @@ func MilvusCollection(ctx context.Context) string {
 		return MilvusCollectionName
 	}
 	return collection
-}
-
-func MilvusBinaryVectorDim(ctx context.Context) string {
-	v, err := g.Cfg().Get(ctx, "milvus.vector_dim")
-	if err != nil {
-		return strconv.Itoa(MilvusVectorDim)
-	}
-	dim := v.Int()
-	if dim <= 0 {
-		return strconv.Itoa(MilvusVectorDim)
-	}
-	return strconv.Itoa(dim)
 }

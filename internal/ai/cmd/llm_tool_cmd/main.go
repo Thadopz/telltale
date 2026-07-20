@@ -2,6 +2,7 @@ package main
 
 import (
 	tools2 "SREagent/internal/ai/tools"
+	"SREagent/internal/appconfig"
 	"context"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+	appconfig.Configure(ctx)
 	// 创建 ChatModel
 	config := &openai.ChatModelConfig{
 		APIKey:  os.Getenv("SREAGENT_CHAT_API_KEY"),

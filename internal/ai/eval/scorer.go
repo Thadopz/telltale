@@ -4,11 +4,12 @@ import "strings"
 
 func ScoreCase(c Case, result EvalCaseResult) EvalScores {
 	var reasons []string
+	expected := c.Expected
 
 	routeOK := true
-	if c.Expected.UseKnowledge != nil && result.Context.UseKnowledge != *c.Expected.UseKnowledge {
+	if expected.UseKnowledge != nil && result.Context.UseKnowledge != *expected.UseKnowledge {
 		routeOK = false
-		if *c.Expected.UseKnowledge {
+		if *expected.UseKnowledge {
 			reasons = append(reasons, "expected knowledge retrieval but skipped")
 		} else {
 			reasons = append(reasons, "expected no knowledge retrieval but retrieval was used")
@@ -16,13 +17,13 @@ func ScoreCase(c Case, result EvalCaseResult) EvalScores {
 	}
 
 	toolNames := calledToolNames(result.ToolCalls)
-	for _, name := range c.Expected.Tools {
+	for _, name := range expected.Tools {
 		if !toolNames[name] {
 			routeOK = false
 			reasons = append(reasons, "expected tool "+name+" but not called")
 		}
 	}
-	for _, name := range c.Expected.NotTools {
+	for _, name := range expected.NotTools {
 		if toolNames[name] {
 			routeOK = false
 			reasons = append(reasons, "tool "+name+" should not be called")
@@ -31,22 +32,34 @@ func ScoreCase(c Case, result EvalCaseResult) EvalScores {
 
 	evidenceOK := true
 	evidenceText := strings.ToLower(joinEvidence(result))
-	for _, phrase := range c.Expected.EvidenceContains {
+	for _, phrase := range expected.EvidenceContains {
 		if !strings.Contains(evidenceText, strings.ToLower(phrase)) {
 			evidenceOK = false
 			reasons = append(reasons, "evidence missing required phrase "+phrase)
 		}
 	}
+	if !containsAny(evidenceText, expected.EvidenceContainsAny) {
+		evidenceOK = false
+		reasons = append(reasons, "evidence missing all acceptable phrases")
+	}
+	if expected.MinRetrievedDocs > 0 && len(result.RetrievedDocs) < expected.MinRetrievedDocs {
+		evidenceOK = false
+		reasons = append(reasons, "retrieved fewer documents than required")
+	}
 
 	answerOK := true
 	answer := strings.ToLower(result.Answer)
-	for _, phrase := range c.Expected.AnswerContains {
+	for _, phrase := range expected.AnswerContains {
 		if !strings.Contains(answer, strings.ToLower(phrase)) {
 			answerOK = false
 			reasons = append(reasons, "answer missing required phrase "+phrase)
 		}
 	}
-	for _, phrase := range c.Expected.AnswerNotContains {
+	if !containsAny(answer, expected.AnswerContainsAny) {
+		answerOK = false
+		reasons = append(reasons, "answer missing all acceptable phrases")
+	}
+	for _, phrase := range expected.AnswerNotContains {
 		if strings.Contains(answer, strings.ToLower(phrase)) {
 			answerOK = false
 			reasons = append(reasons, "answer contains forbidden phrase "+phrase)
@@ -75,6 +88,18 @@ func ScoreCase(c Case, result EvalCaseResult) EvalScores {
 		Pass:          pass,
 		Reasons:       reasons,
 	}
+}
+
+func containsAny(text string, phrases []string) bool {
+	if len(phrases) == 0 {
+		return true
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(text, strings.ToLower(phrase)) {
+			return true
+		}
+	}
+	return false
 }
 
 func calledToolNames(calls []ToolEvidence) map[string]bool {

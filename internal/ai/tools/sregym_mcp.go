@@ -11,12 +11,9 @@ import (
 	"sync"
 	"time"
 
-	e_mcp "github.com/cloudwego/eino-ext/components/tool/mcp"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
 )
 
 type sregymEndpoint struct {
@@ -139,23 +136,7 @@ func loadSREGymEndpoints(ctx context.Context, endpoints []sregymEndpoint, loader
 }
 
 func loadSREGymEndpoint(ctx context.Context, endpoint sregymEndpoint, headers map[string]string) ([]tool.BaseTool, error) {
-	cli, err := client.NewSSEMCPClient(endpoint.URL, client.WithHeaders(headers))
-	if err != nil {
-		return nil, err
-	}
-	if err = cli.Start(ctx); err != nil {
-		return nil, err
-	}
-	initRequest := mcp.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initRequest.Params.ClientInfo = mcp.Implementation{
-		Name:    "sreagent-sregym-client",
-		Version: "1.0.0",
-	}
-	if _, err = cli.Initialize(ctx, initRequest); err != nil {
-		return nil, err
-	}
-	return e_mcp.GetTools(ctx, &e_mcp.Config{Cli: cli})
+	return loadStreamableHTTPMCPTools(ctx, endpoint.URL, headers, "sreagent-sregym-client")
 }
 
 func sregymEndpoints(ctx context.Context) []sregymEndpoint {
@@ -165,14 +146,14 @@ func sregymEndpoints(ctx context.Context) []sregymEndpoint {
 	baseMCP := "http://" + apiHost + ":" + mcpPort
 	baseAPI := "http://" + apiHost + ":" + apiPort
 	endpoints := []sregymEndpoint{
-		{Name: "kubectl", URL: envOrConfig(ctx, "SREGYM_KUBECTL_MCP_URL", "tools.sregym.kubectl_mcp_url", baseMCP+"/kubectl/sse")},
-		{Name: "prometheus", URL: envOrConfig(ctx, "SREGYM_PROMETHEUS_MCP_URL", "tools.sregym.prometheus_mcp_url", baseMCP+"/prometheus/sse")},
-		{Name: "jaeger", URL: envOrConfig(ctx, "SREGYM_JAEGER_MCP_URL", "tools.sregym.jaeger_mcp_url", baseMCP+"/jaeger/sse")},
+		{Name: "kubectl", URL: envOrConfig(ctx, "SREGYM_KUBECTL_MCP_URL", "tools.sregym.kubectl_mcp_url", baseMCP+"/kubectl/mcp")},
+		{Name: "prometheus", URL: envOrConfig(ctx, "SREGYM_PROMETHEUS_MCP_URL", "tools.sregym.prometheus_mcp_url", baseMCP+"/prometheus/mcp")},
+		{Name: "jaeger", URL: envOrConfig(ctx, "SREGYM_JAEGER_MCP_URL", "tools.sregym.jaeger_mcp_url", baseMCP+"/jaeger/mcp")},
 	}
 	if configBool(ctx, "tools.sregym.register_submit", false) {
 		endpoints = append(endpoints, sregymEndpoint{
 			Name: "submit",
-			URL:  envOrConfig(ctx, "SREGYM_SUBMIT_MCP_URL", "tools.sregym.submit_mcp_url", baseAPI+"/submit_mcp/sse"),
+			URL:  envOrConfig(ctx, "SREGYM_SUBMIT_MCP_URL", "tools.sregym.submit_mcp_url", baseAPI+"/submit_mcp/mcp"),
 		})
 	}
 	return endpoints

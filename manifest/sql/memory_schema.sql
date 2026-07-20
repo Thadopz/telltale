@@ -50,17 +50,35 @@ CREATE TABLE IF NOT EXISTS session_states (
 CREATE TABLE IF NOT EXISTS durable_memories (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id VARCHAR(128) NOT NULL,
+  memory_key VARCHAR(128) NOT NULL,
   kind VARCHAR(64) NOT NULL,
   content TEXT NOT NULL,
   metadata JSON NULL,
   confidence DECIMAL(5,4) NOT NULL DEFAULT 1.0000,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  vector_status VARCHAR(32) NOT NULL DEFAULT 'pending',
   source_conversation_id VARCHAR(128) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
+  UNIQUE KEY uk_user_memory_key (user_id, memory_key),
   KEY idx_user_status_updated (user_id, status, updated_at),
   KEY idx_source_conversation_id (source_conversation_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS durable_memory_candidates (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id VARCHAR(128) NOT NULL,
+  memory_key VARCHAR(128) NOT NULL,
+  kind VARCHAR(64) NOT NULL,
+  content TEXT NOT NULL,
+  confidence DECIMAL(5,4) NOT NULL DEFAULT 1.0000,
+  source_conversation_id VARCHAR(128) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_user_candidate_key (user_id, memory_key),
+  KEY idx_user_candidate_updated (user_id, updated_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS tool_results (

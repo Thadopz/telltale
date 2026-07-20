@@ -107,6 +107,30 @@ func TestRegistryFiltersToolsForViewer(t *testing.T) {
 	}
 }
 
+func TestRegistryGroupsChatToolsByDomain(t *testing.T) {
+	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
+	sets, err := NewRegistry().ChatDomainTools(ctx)
+	if err != nil {
+		t.Fatalf("load chat domain tools: %v", err)
+	}
+
+	byDomain := make(map[Domain]map[string]bool, len(sets))
+	for _, set := range sets {
+		byDomain[set.Domain] = toolNames(t, ctx, set.Tools)
+	}
+
+	assertToolInDomain(t, byDomain, DomainGeneral, "get_current_time")
+	assertToolInDomain(t, byDomain, DomainObservability, "query_prometheus_alerts")
+	assertToolInDomain(t, byDomain, DomainDatabase, "mysql_crud")
+	assertToolInDomain(t, byDomain, DomainDatabase, "mysql_slow_sql")
+	assertToolInDomain(t, byDomain, DomainPayment, "query_payment_anomaly")
+	assertToolInDomain(t, byDomain, DomainKnowledge, "query_internal_docs")
+
+	if byDomain[DomainObservability]["mysql_crud"] || byDomain[DomainDatabase]["query_payment_anomaly"] || byDomain[DomainPayment]["query_internal_docs"] {
+		t.Fatalf("tools crossed domain boundaries: %#v", byDomain)
+	}
+}
+
 func TestRegistryIncludesLocalKubectlToolForSREGymRole(t *testing.T) {
 	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "sregym", Roles: []string{"sregym"}})
 	tools, err := NewRegistry().ToolsFor(ctx, ScenarioChat)
@@ -157,4 +181,11 @@ func toolNames(t *testing.T, ctx context.Context, candidates []tool.BaseTool) ma
 
 func contains(s string, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+func assertToolInDomain(t *testing.T, domains map[Domain]map[string]bool, domain Domain, name string) {
+	t.Helper()
+	if !domains[domain][name] {
+		t.Fatalf("expected %s in %s domain, got %#v", name, domain, domains[domain])
+	}
 }

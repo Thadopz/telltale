@@ -2,6 +2,7 @@ package main
 
 import (
 	"SREagent/internal/ai/eval"
+	"SREagent/internal/appconfig"
 	"context"
 	"flag"
 	"fmt"
@@ -9,16 +10,22 @@ import (
 )
 
 func main() {
-	casesPath := flag.String("cases", "testdata/eval/chat_cases.jsonl", "path to eval cases jsonl")
+	casesPath := flag.String("cases", "", "path to eval cases jsonl; defaults depend on mode")
 	mode := flag.String("mode", string(eval.ModeMock), "eval mode: mock or smoke")
 	reportsDir := flag.String("reports", "reports", "directory for eval reports")
 	runID := flag.String("run-id", "", "optional report run id")
 	caseTimeout := flag.Int("case-timeout", 60, "per-case timeout in seconds")
 	flag.Parse()
+	ctx := context.Background()
+	appconfig.Configure(ctx)
+	resolvedCasesPath := *casesPath
+	if resolvedCasesPath == "" {
+		resolvedCasesPath = defaultCasesPath(eval.Mode(*mode))
+	}
 
-	result, err := eval.Run(context.Background(), eval.RunOptions{
+	result, err := eval.Run(ctx, eval.RunOptions{
 		Mode:               eval.Mode(*mode),
-		CasesPath:          *casesPath,
+		CasesPath:          resolvedCasesPath,
 		ReportsDir:         *reportsDir,
 		RunID:              *runID,
 		CaseTimeoutSeconds: *caseTimeout,
@@ -39,4 +46,11 @@ func main() {
 	if result.Summary.Failed > 0 {
 		os.Exit(2)
 	}
+}
+
+func defaultCasesPath(mode eval.Mode) string {
+	if mode == eval.ModeSmoke {
+		return "testdata/eval/smoke_cases.jsonl"
+	}
+	return "testdata/eval/chat_cases.jsonl"
 }

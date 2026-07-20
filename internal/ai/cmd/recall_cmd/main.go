@@ -2,12 +2,14 @@ package main
 
 import (
 	retriever2 "SREagent/internal/ai/retriever"
+	"SREagent/internal/appconfig"
 	"context"
 	"fmt"
 )
 
 func main() {
 	ctx := context.Background()
+	appconfig.Configure(ctx)
 	r, err := retriever2.NewMilvusRetriever(ctx)
 	if err != nil {
 		panic(err)

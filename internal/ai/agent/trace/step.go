@@ -2,6 +2,7 @@ package trace
 
 import (
 	"SREagent/internal/ai/evidence"
+	"SREagent/internal/observability"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,11 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+type componentSpanKey struct{}
 
 type AgentStep struct {
 	Index     int       `json:"index"`
@@ -109,6 +114,18 @@ func (r *Recorder) ToolEvidence() []ToolEvidence {
 	return items
 }
 
+func (r *Recorder) QualityCounts() (evidenceCount int, failedToolCount int) {
+	for _, item := range r.ToolEvidence() {
+		if item.EvidenceID != "" {
+			evidenceCount++
+		}
+		if item.FailedQueryID != "" || strings.EqualFold(item.Status, "error") {
+			failedToolCount++
+		}
+	}
+	return evidenceCount, failedToolCount
+}
+
 func (r *Recorder) PushToolInput(name string, input string) {
 	if r == nil {
 		return
@@ -163,6 +180,7 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	builder := callbacks.NewHandlerBuilder()
 
 	builder.OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		ctx = startComponentSpan(ctx, info)
 		recordToolInput(info, input, recorder)
 		recorder.Record(AgentStep{
 			Agent:     agent,
@@ -185,11 +203,13 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 			Name:      info.Name,
 			Output:    compactJSON(output),
 		})
+		endComponentSpan(ctx, nil)
 		return ctx
 	})
 
 	builder.OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		recordToolError(info, err, recorder)
+		endComponentSpan(ctx, err)
 		return ctx
 	})
 
@@ -203,6 +223,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		if info == nil {
 			return ctx
 		}
+		ctx = startComponentSpan(ctx, info)
 		recordToolInput(info, input, recorder)
 		step := recorder.Record(AgentStep{
 			Agent:     agent,
@@ -230,6 +251,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 			Output:    compactJSON(output),
 		})
 		emitTraceStep(info, step, emit)
+		endComponentSpan(ctx, nil)
 		return ctx
 	})
 
@@ -251,10 +273,31 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 			Error:     truncate(errText, 1000),
 		})
 		emitTraceStep(info, step, emit)
+		endComponentSpan(ctx, err)
 		return ctx
 	})
 
 	return builder.Build()
+}
+
+func startComponentSpan(ctx context.Context, info *callbacks.RunInfo) context.Context {
+	if info == nil {
+		return ctx
+	}
+	ctx, span := observability.StartSpan(ctx, "eino.component",
+		attribute.String("eino.component", string(info.Component)),
+		attribute.String("eino.type", info.Type),
+		attribute.String("eino.name", info.Name),
+	)
+	return context.WithValue(ctx, componentSpanKey{}, span)
+}
+
+func endComponentSpan(ctx context.Context, err error) {
+	span, ok := ctx.Value(componentSpanKey{}).(oteltrace.Span)
+	if !ok {
+		return
+	}
+	observability.EndSpan(span, err)
 }
 
 func recordToolInput(info *callbacks.RunInfo, input callbacks.CallbackInput, recorder *Recorder) {

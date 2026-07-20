@@ -25,14 +25,15 @@ type RetrievalObservation struct {
 }
 
 type ChatAgentOptions struct {
-	ChatModel    model.ToolCallingChatModel
-	Retriever    retriever.Retriever
-	Tools        []tool.BaseTool
-	SkipRerank   bool
-	OnRetrieval  func(RetrievalObservation)
-	DocumentMax  int
-	DocumentsMax int
-	ReactMaxStep int
+	ChatModel     model.ToolCallingChatModel
+	FailoverModel model.ToolCallingChatModel
+	Retriever     retriever.Retriever
+	Tools         []tool.BaseTool
+	SkipRerank    bool
+	OnRetrieval   func(RetrievalObservation)
+	DocumentMax   int
+	DocumentsMax  int
+	MaxIterations int
 }
 
 func (o ChatAgentOptions) documentMax() int {

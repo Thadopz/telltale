@@ -36,13 +36,14 @@ permissions:
 The tool URLs default to SREGym's runtime environment:
 
 ```text
-http://$API_HOSTNAME:$MCP_SERVER_PORT/kubectl/sse
-http://$API_HOSTNAME:$MCP_SERVER_PORT/prometheus/sse
-http://$API_HOSTNAME:$MCP_SERVER_PORT/jaeger/sse
+http://$API_HOSTNAME:$MCP_SERVER_PORT/kubectl/mcp
+http://$API_HOSTNAME:$MCP_SERVER_PORT/prometheus/mcp
+http://$API_HOSTNAME:$MCP_SERVER_PORT/jaeger/mcp
 ```
 
 Override them with `SREGYM_KUBECTL_MCP_URL`,
 `SREGYM_PROMETHEUS_MCP_URL`, or `SREGYM_JAEGER_MCP_URL` if needed.
+The configured endpoints must expose the MCP Streamable HTTP transport.
 
 `submit_mcp` is not registered by default because `scripts/sregym_driver.py`
 handles stage submissions. Set `tools.sregym.register_submit: true` only if you
