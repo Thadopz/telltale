@@ -71,7 +71,6 @@ def ask_sreagent(service_url: str, question: str, conversation_id: str, timeout:
         "userId": "sregym",
         "conversationId": conversation_id,
         "question": question,
-        "knowledgeMode": "never",
     }
     headers = {
         "Content-Type": "application/json",

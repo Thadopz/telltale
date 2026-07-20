@@ -19,7 +19,7 @@ func (r *knowledgeToolRetriever) Retrieve(context.Context, string, ...retriever.
 	return []*schema.Document{{Content: "shared knowledge result"}}, nil
 }
 
-func TestQueryInternalDocsUsesSuccessfulPreRetrievalCache(t *testing.T) {
+func TestQueryInternalDocsUsesSessionQueryCache(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "client_id", "tool-cache-"+t.Name())
 	searcher := &knowledgeToolRetriever{}
 	query := "payment callback runbook " + t.Name()
@@ -31,7 +31,7 @@ func TestQueryInternalDocsUsesSuccessfulPreRetrievalCache(t *testing.T) {
 		SkipRerank: true,
 	})
 	if err != nil {
-		t.Fatalf("seed pre-retrieval result: %v", err)
+		t.Fatalf("seed session query cache: %v", err)
 	}
 
 	knowledgeTool, err := NewQueryInternalDocsTool()
@@ -44,7 +44,7 @@ func TestQueryInternalDocsUsesSuccessfulPreRetrievalCache(t *testing.T) {
 	}
 
 	if searcher.calls != 1 {
-		t.Fatalf("expected tool not to access Milvus after successful pre-retrieval, got %d calls", searcher.calls)
+		t.Fatalf("expected tool not to access Milvus after a cached equivalent query, got %d calls", searcher.calls)
 	}
 	if !strings.Contains(output, "session query cache") {
 		t.Fatalf("expected cache result message, got %s", output)

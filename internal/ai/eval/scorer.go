@@ -42,10 +42,6 @@ func ScoreCase(c Case, result EvalCaseResult) EvalScores {
 		evidenceOK = false
 		reasons = append(reasons, "evidence missing all acceptable phrases")
 	}
-	if expected.MinRetrievedDocs > 0 && len(result.RetrievedDocs) < expected.MinRetrievedDocs {
-		evidenceOK = false
-		reasons = append(reasons, "retrieved fewer documents than required")
-	}
 
 	answerOK := true
 	answer := strings.ToLower(result.Answer)
@@ -114,12 +110,6 @@ func calledToolNames(calls []ToolEvidence) map[string]bool {
 
 func joinEvidence(result EvalCaseResult) string {
 	var b strings.Builder
-	for _, doc := range result.RetrievedDocs {
-		b.WriteString(doc.Source)
-		b.WriteByte('\n')
-		b.WriteString(doc.Content)
-		b.WriteByte('\n')
-	}
 	for _, call := range result.ToolCalls {
 		b.WriteString(call.Output)
 		b.WriteByte('\n')

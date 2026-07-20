@@ -16,7 +16,7 @@ type QueryInternalDocsInput struct {
 func NewQueryInternalDocsTool() (tool.InvokableTool, error) {
 	t, err := utils.InferOptionableTool(
 		"query_internal_docs",
-		"Search internal documentation through the shared Dense + BM25 + RRF + reranker pipeline. Do not call this tool when the current prompt says knowledge pre-retrieval succeeded for the same normalized query intent.",
+		"Search internal documentation through the shared Dense + BM25 + RRF + reranker pipeline.",
 		func(ctx context.Context, input *QueryInternalDocsInput, opts ...tool.Option) (output string, err error) {
 			result, err := knowledge.DefaultService().Search(ctx, knowledge.SearchRequest{
 				SessionID: knowledgeToolSessionID(ctx),

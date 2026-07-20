@@ -14,21 +14,16 @@ func BuildChatAgent(ctx context.Context) (r compose.Runnable[*UserMessage, *sche
 
 func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r compose.Runnable[*UserMessage, *schema.Message], err error) {
 	const (
-		PrepareContext   = "PrepareContext"
-		ContextDocuments = "ContextDocuments"
-		ChatTemplate     = "ChatTemplate"
-		ADKAgent         = "ADKAgent"
-		InputToChat      = "InputToChat"
+		PrepareContext = "PrepareContext"
+		ChatTemplate   = "ChatTemplate"
+		ADKAgent       = "ADKAgent"
+		InputToChat    = "InputToChat"
 	)
 
 	g := compose.NewGraph[*UserMessage, *schema.Message]()
 	if err = g.AddLambdaNode(PrepareContext, compose.InvokableLambda(newPrepareContextLambda), compose.WithNodeName("PrepareContext")); err != nil {
 		return nil, fmt.Errorf("add prepare context node: %w", err)
 	}
-	if err = g.AddLambdaNode(ContextDocuments, compose.InvokableLambdaWithOption(newContextDocumentsLambdaWithOptions(opts)), compose.WithNodeName("ContextDocuments")); err != nil {
-		return nil, fmt.Errorf("add context documents node: %w", err)
-	}
-
 	chatTemplate, err := newChatTemplate(ctx)
 	if err != nil {
 		return nil, err
@@ -50,9 +45,7 @@ func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r co
 
 	edges := [][2]string{
 		{compose.START, PrepareContext},
-		{PrepareContext, ContextDocuments},
 		{PrepareContext, InputToChat},
-		{ContextDocuments, ChatTemplate},
 		{InputToChat, ChatTemplate},
 		{ChatTemplate, ADKAgent},
 		{ADKAgent, compose.END},

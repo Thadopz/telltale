@@ -37,7 +37,6 @@ func TestChatPipelineSendsOneSystemMessageToCoordinator(t *testing.T) {
 	runner, err := BuildChatAgentWithOptions(ctx, ChatAgentOptions{
 		ChatModel:     chatModel,
 		Tools:         []tool.BaseTool{},
-		SkipRerank:    true,
 		MaxIterations: 3,
 	})
 	if err != nil {

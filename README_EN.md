@@ -131,7 +131,7 @@ When observability is enabled, traces cover chat requests, Eino components, the 
 
 Agent-level metrics are `sreagent.agent.runs`, `sreagent.agent.duration`, and `sreagent.agent.routes`. They use fixed agent names, domains, kinds, statuses, and the streaming flag as low-cardinality attributes, allowing coordinator and domain-agent traffic, success rate, routing distribution, and latency to be compared.
 
-Pre-retrieval and `query_internal_docs` share one KnowledgeService. When pre-retrieval succeeds and the normalized query has not changed, the coordinator uses the injected documents instead of calling the knowledge tool again. Dense + BM25 + RRF + reranker results are cached briefly for the same tenant, user, conversation, and normalized query. Failed retrievals are not cached.
+The coordinator now calls `knowledge_agent` dynamically from the current request semantics; keyword-based pre-retrieval no longer injects documents into every matching request. `query_internal_docs` inside the knowledge agent uses the shared KnowledgeService. Dense + BM25 + RRF + reranker results are cached briefly for the same tenant, user, conversation, and normalized query. Failed retrievals are not cached.
 
 ## Database Setup
 

@@ -70,11 +70,12 @@ func TestRunCaseMockCollectsEvidenceAndScores(t *testing.T) {
 		Category: "knowledge",
 		Query:    "how to handle alert by runbook",
 		MockContext: MockContext{
-			Documents:  []DocEvidence{{Source: "runbook.md", Content: "runbook evidence"}},
-			MockAnswer: "runbook answer",
+			ToolOutputs: []ToolFixture{{Name: "knowledge_agent", Output: `{"success":true,"message":"runbook evidence"}`}},
+			MockAnswer:  "runbook answer",
 		},
 		Expected: Expected{
 			UseKnowledge:     &useKnowledge,
+			Tools:            []string{"knowledge_agent"},
 			AnswerContains:   []string{"runbook"},
 			EvidenceContains: []string{"runbook evidence"},
 		},
@@ -87,8 +88,8 @@ func TestRunCaseMockCollectsEvidenceAndScores(t *testing.T) {
 	if !result.Scores.Pass {
 		t.Fatalf("expected pass, got reasons=%v result=%#v", result.Scores.Reasons, result)
 	}
-	if len(result.RetrievedDocs) == 0 {
-		t.Fatal("expected retrieved docs")
+	if !result.Context.UseKnowledge {
+		t.Fatal("expected knowledge tool usage")
 	}
 }
 

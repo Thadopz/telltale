@@ -47,21 +47,10 @@ var systemPrompt = `
 ## Request Analysis
 {request_analysis}
 
-- 相关文档：
-==== 文档开始 ====
-Knowledge pre-retrieval status: {knowledge_retrieval_status}
-Knowledge normalized query: {knowledge_normalized_query}
-Knowledge cache hit: {knowledge_retrieval_cache_hit}
-
-- When knowledge pre-retrieval status is "success" and the required query intent matches the normalized query above, use the supplied documents and do not call knowledge_agent or query_internal_docs again.
-- Call knowledge_agent only when pre-retrieval failed, was not requested, or the required knowledge query intent has materially changed.
-
 Active skills:
 ==== Skills Start ====
 {skills}
 ==== Skills End ====
-{documents}
-==== 文档结束 ====
 `
 
 const coordinatorPrompt = `

@@ -8,12 +8,10 @@ import (
 
 const (
 	HistoryMaxChars       = 8000
-	DocumentsMaxChars     = 8000
 	SummaryMaxChars       = 3000
 	SessionStateMaxChars  = 1500
 	DurableMemoryMaxChars = 2000
 	ToolResultsMaxChars   = 2500
-	DocumentMaxChars      = 2500
 )
 
 func trimRunesHead(s string, max int) string {
@@ -22,14 +20,6 @@ func trimRunesHead(s string, max int) string {
 	}
 	runes := []rune(s)
 	return string(runes[len(runes)-max:])
-}
-
-func trimRunesTail(s string, max int) string {
-	if max <= 0 || utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	runes := []rune(s)
-	return string(runes[:max])
 }
 
 func budgetHistoryMessages(history []*schema.Message, maxChars int) []*schema.Message {
@@ -100,35 +90,4 @@ func alignHistoryPairStart(messages []*schema.Message, start int) int {
 
 func isUserMessage(msg *schema.Message) bool {
 	return msg != nil && string(msg.Role) == "user"
-}
-
-func budgetDocuments(docs []*schema.Document, maxChars int, perDocMaxChars int) []*schema.Document {
-	if len(docs) == 0 || maxChars <= 0 || perDocMaxChars <= 0 {
-		return []*schema.Document{}
-	}
-
-	budgeted := make([]*schema.Document, 0, len(docs))
-	total := 0
-	for _, doc := range docs {
-		if doc == nil {
-			continue
-		}
-		remaining := maxChars - total
-		if remaining <= 0 {
-			break
-		}
-
-		docCopy := *doc
-		limit := perDocMaxChars
-		if remaining < limit {
-			limit = remaining
-		}
-		docCopy.Content = trimRunesTail(docCopy.Content, limit)
-		if docCopy.Content == "" {
-			continue
-		}
-		total += utf8.RuneCountInString(docCopy.Content)
-		budgeted = append(budgeted, &docCopy)
-	}
-	return budgeted
 }

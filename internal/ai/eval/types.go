@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"SREagent/internal/ai/agent/chat_pipeline"
 	"SREagent/internal/ai/agent/trace"
 	"time"
 )
@@ -23,7 +22,6 @@ type MockContext struct {
 	SessionState  string        `json:"session_state,omitempty"`
 	DurableMemory string        `json:"durable_memory,omitempty"`
 	ToolResults   string        `json:"tool_results,omitempty"`
-	Documents     []DocEvidence `json:"documents,omitempty"`
 	ToolOutputs   []ToolFixture `json:"tool_outputs,omitempty"`
 	MockAnswer    string        `json:"mock_answer,omitempty"`
 }
@@ -43,7 +41,6 @@ type Expected struct {
 	AnswerNotContains   []string `json:"answer_not_contains,omitempty"`
 	EvidenceContains    []string `json:"evidence_contains,omitempty"`
 	EvidenceContainsAny []string `json:"evidence_contains_any,omitempty"`
-	MinRetrievedDocs    int      `json:"min_retrieved_docs,omitempty"`
 }
 
 type Case struct {
@@ -63,13 +60,6 @@ type ContextEvidence struct {
 	HistoryMessages    int  `json:"history_messages"`
 	UseKnowledge       bool `json:"use_knowledge"`
 	PromptContextChars int  `json:"prompt_context_chars"`
-}
-
-type DocEvidence struct {
-	Source  string         `json:"source,omitempty"`
-	Content string         `json:"content"`
-	Meta    map[string]any `json:"meta,omitempty"`
-	Stage   string         `json:"stage,omitempty"`
 }
 
 type ToolEvidence struct {
@@ -97,7 +87,6 @@ type EvalCaseResult struct {
 	Query          string            `json:"query"`
 	ConversationID string            `json:"conversation_id"`
 	Context        ContextEvidence   `json:"context"`
-	RetrievedDocs  []DocEvidence     `json:"retrieved_docs,omitempty"`
 	ToolCalls      []ToolEvidence    `json:"tool_calls,omitempty"`
 	TraceSteps     []trace.AgentStep `json:"trace_steps,omitempty"`
 	Answer         string            `json:"answer"`
@@ -131,13 +120,4 @@ type RunResult struct {
 	Results      []EvalCaseResult
 	JSONLPath    string
 	MarkdownPath string
-}
-
-func docFromPipelineDoc(doc chat_pipeline.RetrievedDocEvidence) DocEvidence {
-	return DocEvidence{
-		Source:  doc.Source,
-		Content: doc.Content,
-		Meta:    doc.Meta,
-		Stage:   doc.Stage,
-	}
 }

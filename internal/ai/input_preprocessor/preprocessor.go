@@ -36,19 +36,17 @@ const (
 )
 
 type ProcessedInput struct {
-	OriginalQuery  string
-	CleanQuery     string
-	Intent         string
-	Domain         string
-	Confidence     string
-	Entities       map[string]string
-	TimeRange      *TimeRange
-	NeedKnowledge  bool
-	KnowledgeQuery string
-	ToolHints      []ToolHint
-	MissingSlots   []string
-	RiskLevel      string
-	Notes          []string
+	OriginalQuery string
+	CleanQuery    string
+	Intent        string
+	Domain        string
+	Confidence    string
+	Entities      map[string]string
+	TimeRange     *TimeRange
+	ToolHints     []ToolHint
+	MissingSlots  []string
+	RiskLevel     string
+	Notes         []string
 }
 
 type TimeRange struct {
@@ -76,19 +74,16 @@ func Process(ctx context.Context, query string, now time.Time) ProcessedInput {
 	classification := DetectIntentDomain(clean, entities)
 	risk := DetectRisk(clean)
 	tr := CompleteTimeRange(clean, classification.Intent, now)
-	needKnowledge := ShouldUseKnowledge(clean, classification.Domain)
 
 	processed := ProcessedInput{
-		OriginalQuery:  query,
-		CleanQuery:     clean,
-		Intent:         classification.Intent,
-		Domain:         classification.Domain,
-		Confidence:     classification.Confidence,
-		Entities:       entities,
-		TimeRange:      tr,
-		NeedKnowledge:  needKnowledge,
-		KnowledgeQuery: BuildKnowledgeQuery(clean, classification.Domain, entities, needKnowledge),
-		RiskLevel:      risk,
+		OriginalQuery: query,
+		CleanQuery:    clean,
+		Intent:        classification.Intent,
+		Domain:        classification.Domain,
+		Confidence:    classification.Confidence,
+		Entities:      entities,
+		TimeRange:     tr,
+		RiskLevel:     risk,
 	}
 	processed.ToolHints = BuildToolHints(processed)
 	processed.MissingSlots = DetectMissingSlots(processed)
@@ -108,8 +103,6 @@ func (p ProcessedInput) FormatPrompt() string {
 	writeKV(&b, "Confidence", p.Confidence)
 	writeKV(&b, "Risk Level", p.RiskLevel)
 	writeKV(&b, "Clean Query", p.CleanQuery)
-	writeKV(&b, "Knowledge Query", p.KnowledgeQuery)
-	writeKV(&b, "Need Knowledge", strconv.FormatBool(p.NeedKnowledge))
 	if p.TimeRange != nil {
 		writeKV(&b, "Time Range", fmt.Sprintf("%s to %s (%s; %s)",
 			p.TimeRange.Start.Format("2006-01-02 15:04:05"),
@@ -275,32 +268,6 @@ func CompleteTimeRange(query string, intent string, now time.Time) *TimeRange {
 	return nil
 }
 
-func ShouldUseKnowledge(query string, domain string) bool {
-	normalized := strings.ToLower(query)
-	return domain == DomainAlert ||
-		domain == DomainKnowledge ||
-		containsAny(normalized, "文档", "知识库", "手册", "流程", "runbook", "sop", "manual", "按手册", "根据手册")
-}
-
-func BuildKnowledgeQuery(query string, domain string, entities map[string]string, needKnowledge bool) string {
-	if query == "" {
-		return ""
-	}
-	parts := []string{query}
-	if needKnowledge {
-		switch domain {
-		case DomainAlert:
-			parts = append(parts, "alert runbook handling procedure")
-		case DomainKnowledge:
-			parts = append(parts, "internal documentation runbook")
-		}
-	}
-	for _, key := range sortedKeys(entities) {
-		parts = append(parts, key+"="+entities[key])
-	}
-	return strings.Join(parts, " ")
-}
-
 func BuildToolHints(p ProcessedInput) []ToolHint {
 	var hints []ToolHint
 	add := func(name string, reason string) {
@@ -324,9 +291,9 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 		add("mysql_slow_sql", "slow SQL evidence")
 	case DomainAlert:
 		add("query_prometheus_alerts", "active alert evidence")
-		add("query_internal_docs", "alert runbook or handling procedure")
+		add("knowledge_agent", "alert runbook or handling procedure")
 	case DomainKnowledge:
-		add("query_internal_docs", "internal documentation")
+		add("knowledge_agent", "internal documentation")
 	}
 	if p.Entities["payment_order_no"] != "" {
 		add("query_payment_order_detail", "order-level detail")
@@ -335,9 +302,6 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 	}
 	if p.Entities["trace_id"] != "" && p.Domain != DomainSlowSQL {
 		add("search_payment_logs", "trace-related diagnostic logs")
-	}
-	if p.NeedKnowledge && p.Domain != DomainAlert && p.Domain != DomainKnowledge {
-		add("query_internal_docs", "requested documentation context")
 	}
 	return hints
 }

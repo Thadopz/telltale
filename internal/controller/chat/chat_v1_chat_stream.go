@@ -37,7 +37,7 @@ func (c *ControllerV1) ChatStream(ctx context.Context, req *v1.ChatStreamReq) (r
 		)
 	}()
 
-	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question, req.KnowledgeMode)
+	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question)
 	if err != nil {
 		return nil, err
 	}

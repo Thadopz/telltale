@@ -10,7 +10,6 @@ type ChatReq struct {
 	UserId         string
 	ConversationId string
 	Question       string
-	KnowledgeMode  string `json:"knowledgeMode"`
 }
 
 type ChatRes struct {
@@ -23,7 +22,6 @@ type ChatStreamReq struct {
 	UserId         string
 	ConversationId string
 	Question       string
-	KnowledgeMode  string `json:"knowledgeMode"`
 }
 
 type ChatStreamRes struct {

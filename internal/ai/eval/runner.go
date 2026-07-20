@@ -56,7 +56,6 @@ func RunCase(ctx context.Context, c Case, opts RunOptions) (EvalCaseResult, erro
 		SessionState:   c.MockContext.SessionState,
 		DurableMemory:  c.MockContext.DurableMemory,
 		ToolResults:    c.MockContext.ToolResults,
-		KnowledgeMode:  chat_pipeline.KnowledgeAuto,
 	}
 
 	modelContext := chat_pipeline.AssembleModelContext(ctx, userMessage, started)
@@ -73,26 +72,15 @@ func RunCase(ctx context.Context, c Case, opts RunOptions) (EvalCaseResult, erro
 			DurableMemoryChars: utf8.RuneCountInString(modelContext.DurableMemory),
 			ToolResultsChars:   utf8.RuneCountInString(modelContext.ToolResults),
 			HistoryMessages:    len(modelContext.History),
-			UseKnowledge:       modelContext.UseKnowledge,
 			PromptContextChars: promptContextChars(modelContext),
 		},
 	}
 
 	recorder := trace.NewRecorder()
-	var retrieved []DocEvidence
-	agentOpts := chat_pipeline.ChatAgentOptions{
-		OnRetrieval: func(obs chat_pipeline.RetrievalObservation) {
-			result.Context.UseKnowledge = obs.Triggered
-			for _, doc := range obs.Docs {
-				retrieved = append(retrieved, docFromPipelineDoc(doc))
-			}
-		},
-	}
+	agentOpts := chat_pipeline.ChatAgentOptions{}
 	if opts.Mode == ModeMock {
 		agentOpts.ChatModel = &fakeModel{caseData: c, toolNames: c.Expected.Tools}
-		agentOpts.Retriever = fakeRetriever{docs: c.MockContext.Documents}
 		agentOpts.Tools = fakeTools(c)
-		agentOpts.SkipRerank = true
 		agentOpts.MaxIterations = 8
 	}
 
@@ -115,10 +103,19 @@ func RunCase(ctx context.Context, c Case, opts RunOptions) (EvalCaseResult, erro
 	}
 	result.ElapsedMS = time.Since(started).Milliseconds()
 	result.TraceSteps = recorder.Steps()
-	result.RetrievedDocs = retrieved
 	result.ToolCalls = toolEvidenceFromTrace(result.TraceSteps)
+	result.Context.UseKnowledge = usedKnowledgeTool(result.ToolCalls)
 	result.Scores = ScoreCase(c, result)
 	return result, nil
+}
+
+func usedKnowledgeTool(calls []ToolEvidence) bool {
+	for _, call := range calls {
+		if call.Name == "knowledge_agent" || call.Name == "query_internal_docs" {
+			return true
+		}
+	}
+	return false
 }
 
 func schemaHistory(history []ChatMessage) []*schema.Message {

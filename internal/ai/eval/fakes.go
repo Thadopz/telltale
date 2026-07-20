@@ -7,29 +7,9 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
-
-type fakeRetriever struct {
-	docs []DocEvidence
-}
-
-func (r fakeRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
-	docs := make([]*schema.Document, 0, len(r.docs))
-	for _, doc := range r.docs {
-		meta := doc.Meta
-		if meta == nil {
-			meta = map[string]any{}
-		}
-		if doc.Source != "" {
-			meta["_source"] = doc.Source
-		}
-		docs = append(docs, &schema.Document{Content: doc.Content, MetaData: meta})
-	}
-	return docs, nil
-}
 
 type fakeTool struct {
 	name   string

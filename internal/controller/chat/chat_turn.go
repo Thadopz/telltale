@@ -27,7 +27,6 @@ func prepareChatTurn(
 	userID string,
 	conversationID string,
 	question string,
-	knowledgeMode string,
 ) (*preparedChatTurn, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
@@ -44,11 +43,6 @@ func prepareChatTurn(
 	}
 	if userID == "" || conversationID == "" {
 		return nil, fmt.Errorf("user id or conversation id is required")
-	}
-
-	mode, err := normalizeKnowledgeMode(knowledgeMode)
-	if err != nil {
-		return nil, err
 	}
 
 	ctx = authz.WithPrincipal(ctx, principal)
@@ -76,22 +70,8 @@ func prepareChatTurn(
 			SessionState:   layers.SessionState,
 			DurableMemory:  layers.DurableMemory,
 			ToolResults:    layers.ToolResults,
-			KnowledgeMode:  mode,
 		},
 	}, nil
-}
-
-func normalizeKnowledgeMode(raw string) (chat_pipeline.KnowledgeMode, error) {
-	switch chat_pipeline.KnowledgeMode(strings.ToLower(strings.TrimSpace(raw))) {
-	case "", chat_pipeline.KnowledgeAuto:
-		return chat_pipeline.KnowledgeAuto, nil
-	case chat_pipeline.KnowledgeAlways:
-		return chat_pipeline.KnowledgeAlways, nil
-	case chat_pipeline.KnowledgeNever:
-		return chat_pipeline.KnowledgeNever, nil
-	default:
-		return "", fmt.Errorf("knowledge mode must be auto, always, or never")
-	}
 }
 
 func saveCompletedTurn(ctx context.Context, turn *preparedChatTurn, answer string) error {

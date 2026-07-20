@@ -78,17 +78,6 @@ knowledge_retrieval:
   rrf_k: 60
   cache_ttl_seconds: 120
   cache_max_entries: 256
-  auto_keywords:
-    - nacos
-    - rocketmq
-    - "\u8ba2\u5355\u8d85\u65f6"
-    - "\u652f\u4ed8\u56de\u8c03\u5931\u8d25"
-  force_phrases:
-    - "\u67e5\u77e5\u8bc6\u5e93"
-    - "\u6309\u624b\u518c"
-  suppress_phrases:
-    - "\u4e0d\u67e5\u77e5\u8bc6\u5e93"
-    - "\u53ea\u6839\u636e\u5f53\u524d\u5bf9\u8bdd"
 
 skills:
   enabled: true

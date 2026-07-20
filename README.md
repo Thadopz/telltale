@@ -131,7 +131,7 @@ tools:
 
 Agent 级指标包括 `sreagent.agent.runs`、`sreagent.agent.duration` 和 `sreagent.agent.routes`。它们使用固定的 Agent 名称、领域、类型、状态和流式标记作为低基数属性，可用于比较协调 Agent 与各领域 Agent 的调用量、成功率、路由分布和耗时。
 
-预检索和 `query_internal_docs` 共用同一个 KnowledgeService。预检索成功且规范化查询未变化时，协调 Agent 会直接使用已注入文档，不再调用知识工具；同一租户、用户和会话中的相同规范化查询会在短期缓存内复用 Dense + BM25 + RRF + reranker 结果。失败结果不会缓存。
+知识检索由协调 Agent 按当前语义动态调用 `knowledge_agent`，不再通过关键词预检索并提前注入文档。`knowledge_agent` 内的 `query_internal_docs` 统一使用 KnowledgeService；同一租户、用户和会话中的相同规范化查询会在短期缓存内复用 Dense + BM25 + RRF + reranker 结果。失败结果不会缓存。
 
 ## 初始化数据库
 

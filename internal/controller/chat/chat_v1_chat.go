@@ -33,7 +33,7 @@ func (c *ControllerV1) Chat(ctx context.Context, req *v1.ChatReq) (res *v1.ChatR
 		)
 	}()
 
-	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question, req.KnowledgeMode)
+	turn, err := prepareChatTurn(ctx, req.Id, req.UserId, req.ConversationId, req.Question)
 	if err != nil {
 		return nil, err
 	}
