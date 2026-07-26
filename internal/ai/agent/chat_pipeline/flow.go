@@ -50,7 +50,14 @@ func newADKAgentLambdaWithOptions(ctx context.Context, opts ChatAgentOptions) (*
 		}
 	}
 
-	invokeAgent, err := newChatAgentGraph(ctx, chatModel, failoverModel, opts.Tools, maxIterations, defaultModelRetries(ctx))
+	modelRetries := defaultModelRetries(ctx)
+	if opts.ModelRetries != nil {
+		modelRetries = *opts.ModelRetries
+		if modelRetries < 0 {
+			modelRetries = 0
+		}
+	}
+	invokeAgent, err := newChatAgentGraph(ctx, chatModel, failoverModel, opts.Tools, maxIterations, modelRetries)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,8 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,109 +13,101 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type fakeTool struct {
-	name   string
-	output string
-	errMsg string
+type fixtureTool struct {
+	fixture ToolFixture
 }
 
-func (t fakeTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t fixtureTool) Info(context.Context) (*schema.ToolInfo, error) {
+	description := strings.TrimSpace(t.fixture.Description)
+	if description == "" {
+		description = "Deterministic eval fixture for " + t.fixture.Name
+	}
 	return &schema.ToolInfo{
-		Name: t.name,
-		Desc: "eval fake tool " + t.name,
+		Name: t.fixture.Name,
+		Desc: description,
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"query": {Type: schema.String, Desc: "query"},
+			"query": {Type: schema.String, Desc: "Complete request, identifiers, and time range."},
 		}),
 	}, nil
 }
 
-func (t fakeTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	if t.errMsg != "" {
-		return `{"success":false,"error":"` + escapeJSONString(t.errMsg) + `"}`, nil
+func (t fixtureTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	if t.fixture.Error != "" {
+		return `{"success":false,"status":"error","error":"` + escapeJSONString(t.fixture.Error) + `"}`, nil
 	}
-	if t.output != "" {
-		return t.output, nil
+	if t.fixture.Output != "" {
+		return t.fixture.Output, nil
 	}
-	return `{"success":true,"message":"fake tool executed"}`, nil
+	return `{"success":true,"status":"success","message":"fixture tool executed"}`, nil
 }
 
-type fakeModel struct {
-	mu        sync.Mutex
-	caseData  Case
-	toolNames []string
-	calls     int
+type scriptedModel struct {
+	mu    sync.Mutex
+	steps []ModelStep
+	calls int
 }
 
-func (m *fakeModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func newScriptedModel(steps []ModelStep) *scriptedModel {
+	copiedSteps := make([]ModelStep, len(steps))
+	copy(copiedSteps, steps)
+	return &scriptedModel{steps: copiedSteps}
+}
+
+func (m *scriptedModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.calls < len(m.toolNames) {
-		toolName := m.toolNames[m.calls]
-		m.calls++
-		return schema.AssistantMessage("", []schema.ToolCall{
-			{
-				ID:   fmt.Sprintf("eval_tool_%d", m.calls),
-				Type: "function",
-				Function: schema.FunctionCall{
-					Name:      toolName,
-					Arguments: `{"query":"` + escapeJSONString(m.caseData.Query) + `"}`,
-				},
-			},
-		}), nil
+	if m.calls >= len(m.steps) {
+		return nil, fmt.Errorf("scripted model exhausted after %d calls", m.calls)
 	}
+	step := m.steps[m.calls]
 	m.calls++
-	return schema.AssistantMessage(mockAnswer(m.caseData), nil), nil
+
+	switch step.Type {
+	case "tool_call":
+		arguments, err := json.Marshal(step.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("marshal scripted tool arguments: %w", err)
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:   fmt.Sprintf("eval_tool_%d", m.calls),
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      step.Tool,
+				Arguments: string(arguments),
+			},
+		}}), nil
+	case "answer":
+		return schema.AssistantMessage(step.Content, nil), nil
+	case "model_error":
+		return nil, errors.New(step.Error)
+	default:
+		return nil, fmt.Errorf("unsupported scripted model step %q", step.Type)
+	}
 }
 
-func (m *fakeModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	msg, err := m.Generate(ctx, input, opts...)
+func (m *scriptedModel) Stream(ctx context.Context, input []*schema.Message, options ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, input, options...)
 	if err != nil {
 		return nil, err
 	}
-	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func (m *fakeModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (m *scriptedModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }
 
-func fakeTools(c Case) []tool.BaseTool {
-	fixtures := map[string]ToolFixture{}
-	for _, fixture := range c.MockContext.ToolOutputs {
-		fixtures[fixture.Name] = fixture
-	}
-
-	names := c.Expected.Tools
-	if len(names) == 0 {
-		names = []string{"get_current_time", "query_prometheus_alerts", "query_internal_docs", "mysql_crud"}
-	}
-	tools := make([]tool.BaseTool, 0, len(names))
-	seen := map[string]bool{}
-	for _, name := range names {
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		fixture := fixtures[name]
-		tools = append(tools, fakeTool{name: name, output: fixture.Output, errMsg: fixture.Error})
+func fixtureTools(fixtures []ToolFixture) []tool.BaseTool {
+	tools := make([]tool.BaseTool, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		tools = append(tools, fixtureTool{fixture: fixture})
 	}
 	return tools
 }
 
-func mockAnswer(c Case) string {
-	if strings.TrimSpace(c.MockContext.MockAnswer) != "" {
-		return c.MockContext.MockAnswer
-	}
-	parts := append([]string{}, c.Expected.AnswerContains...)
-	if len(parts) == 0 {
-		parts = append(parts, "ok")
-	}
-	return strings.Join(parts, " ")
-}
-
-func escapeJSONString(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return s
+func escapeJSONString(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return value
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -20,17 +21,20 @@ import (
 type componentSpanKey struct{}
 
 type AgentStep struct {
-	Index     int       `json:"index"`
-	Agent     string    `json:"agent"`
-	Phase     string    `json:"phase"`
-	Component string    `json:"component,omitempty"`
-	Type      string    `json:"type,omitempty"`
-	Name      string    `json:"name,omitempty"`
-	Input     string    `json:"input,omitempty"`
-	Output    string    `json:"output,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	ElapsedMS int64     `json:"elapsed_ms,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Index            int       `json:"index"`
+	Agent            string    `json:"agent"`
+	Phase            string    `json:"phase"`
+	Component        string    `json:"component,omitempty"`
+	Type             string    `json:"type,omitempty"`
+	Name             string    `json:"name,omitempty"`
+	Input            string    `json:"input,omitempty"`
+	Output           string    `json:"output,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	ElapsedMS        int64     `json:"elapsed_ms,omitempty"`
+	PromptTokens     int       `json:"prompt_tokens,omitempty"`
+	CompletionTokens int       `json:"completion_tokens,omitempty"`
+	TotalTokens      int       `json:"total_tokens,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type ToolEvidence struct {
@@ -195,20 +199,39 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 
 	builder.OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
 		recordToolOutput(info, output, recorder)
+		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
 		recorder.Record(AgentStep{
-			Agent:     agent,
-			Phase:     "end",
-			Component: string(info.Component),
-			Type:      info.Type,
-			Name:      info.Name,
-			Output:    compactJSON(output),
+			Agent:            agent,
+			Phase:            "end",
+			Component:        string(info.Component),
+			Type:             info.Type,
+			Name:             info.Name,
+			Output:           compactJSON(output),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
 		})
 		endComponentSpan(ctx, nil)
 		return ctx
 	})
 
 	builder.OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+		if info == nil {
+			return ctx
+		}
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
 		recordToolError(info, err, recorder)
+		recorder.Record(AgentStep{
+			Agent:     agent,
+			Phase:     "error",
+			Component: string(info.Component),
+			Type:      info.Type,
+			Name:      info.Name,
+			Error:     truncate(errText, 1000),
+		})
 		endComponentSpan(ctx, err)
 		return ctx
 	})
@@ -242,13 +265,17 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 			return ctx
 		}
 		recordToolOutput(info, output, recorder)
+		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
 		step := recorder.Record(AgentStep{
-			Agent:     agent,
-			Phase:     "end",
-			Component: string(info.Component),
-			Type:      info.Type,
-			Name:      info.Name,
-			Output:    compactJSON(output),
+			Agent:            agent,
+			Phase:            "end",
+			Component:        string(info.Component),
+			Type:             info.Type,
+			Name:             info.Name,
+			Output:           compactJSON(output),
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
 		})
 		emitTraceStep(info, step, emit)
 		endComponentSpan(ctx, nil)
@@ -278,6 +305,17 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 	})
 
 	return builder.Build()
+}
+
+func modelTokenUsage(info *callbacks.RunInfo, output callbacks.CallbackOutput) (int, int, int) {
+	if info == nil || info.Component != components.ComponentOfChatModel {
+		return 0, 0, 0
+	}
+	modelOutput := model.ConvCallbackOutput(output)
+	if modelOutput == nil || modelOutput.TokenUsage == nil {
+		return 0, 0, 0
+	}
+	return modelOutput.TokenUsage.PromptTokens, modelOutput.TokenUsage.CompletionTokens, modelOutput.TokenUsage.TotalTokens
 }
 
 func startComponentSpan(ctx context.Context, info *callbacks.RunInfo) context.Context {

@@ -10,4 +10,5 @@ type ChatAgentOptions struct {
 	FailoverModel model.ToolCallingChatModel
 	Tools         []tool.BaseTool
 	MaxIterations int
+	ModelRetries  *int
 }

@@ -1,0 +1,3 @@
+{"id":"smoke-chat","category":"smoke-chat","query":"hello","expected":{"forbidden_agents":["knowledge_agent","payment_agent","observability_agent","database_agent"],"answer_contains_any":["hello","你好"],"forbid_tool_calls":true,"max_model_calls":2}}
+{"id":"smoke-knowledge","category":"smoke-knowledge","query":"查询内部告警处理手册，并概括关键步骤","expected":{"required_agents":["knowledge_agent"],"answer_contains_any":["runbook","手册","文档"],"max_model_calls":6}}
+{"id":"smoke-time","category":"smoke-tool","query":"what time is it now","expected":{"required_tools":["get_current_time"],"answer_contains_any":["current time","现在","时间"],"max_model_calls":3}}
