@@ -19,8 +19,6 @@ observability:
 
 agent:
   invoke_model_retries: 1
-  domain_agents:
-    enabled: true
   failover:
     enabled: false
   tool_search:

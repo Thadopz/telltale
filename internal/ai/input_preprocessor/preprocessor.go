@@ -280,28 +280,32 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 	}
 	normalized := strings.ToLower(p.CleanQuery)
 	if containsAny(normalized, "kubectl", "kubernetes", "k8s", "namespace", "pod", "deployment", "deploy/", "rollout", "astronomy-shop") {
-		add("exec_kubectl_cmd_safely", "Kubernetes cluster command or workload evidence")
+		add("observability_agent", "infrastructure and workload evidence")
 	}
 	switch p.Domain {
 	case DomainPayment, DomainOrder, DomainNotify:
-		add("query_payment_anomaly", "payment/order anomaly evidence")
-		add("query_payment_metrics", "payment business metrics")
-		add("query_payment_status_distribution", "current impact scope")
+		add("payment_agent", "payment, order, or notification domain")
 	case DomainSlowSQL:
-		add("mysql_slow_sql", "slow SQL evidence")
+		add("database_agent", "database and slow SQL domain")
 	case DomainAlert:
-		add("query_prometheus_alerts", "active alert evidence")
-		add("knowledge_agent", "alert runbook or handling procedure")
+		add("observability_agent", "alerts and runtime observability domain")
+	case DomainLog:
+		add("observability_agent", "logs and runtime observability domain")
 	case DomainKnowledge:
-		add("knowledge_agent", "internal documentation")
+		add("knowledge_agent", "internal documentation domain")
 	}
 	if p.Entities["payment_order_no"] != "" {
-		add("query_payment_order_detail", "order-level detail")
-		add("check_payment_consistency", "state consistency")
-		add("search_payment_logs", "order-related diagnostic logs")
+		add("payment_agent", "payment order domain")
 	}
 	if p.Entities["trace_id"] != "" && p.Domain != DomainSlowSQL {
-		add("search_payment_logs", "trace-related diagnostic logs")
+		if p.Domain == DomainPayment || p.Domain == DomainOrder || p.Domain == DomainNotify {
+			add("payment_agent", "payment trace domain")
+		} else {
+			add("observability_agent", "runtime trace domain")
+		}
+	}
+	if p.Domain != DomainKnowledge && containsAny(normalized, "文档", "知识库", "手册", "runbook", "sop", "manual") {
+		add("knowledge_agent", "internal documentation domain")
 	}
 	return hints
 }

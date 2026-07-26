@@ -1,0 +1,72 @@
+package chat_pipeline
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCoordinatorSystemPromptExcludesDomainToolInstructions(t *testing.T) {
+	prompt := coordinatorSystemPrompt()
+	leafToolNames := []string{
+		"query_payment_anomaly",
+		"query_payment_metrics",
+		"query_payment_order_detail",
+		"mysql_slow_sql",
+		"performance_schema",
+		"query_internal_docs",
+	}
+	for _, name := range leafToolNames {
+		if strings.Contains(prompt, name) {
+			t.Fatalf("coordinator prompt must not contain leaf tool %q", name)
+		}
+	}
+}
+
+func TestCoordinatorSystemPromptContainsEvidenceScopeRules(t *testing.T) {
+	prompt := coordinatorSystemPrompt()
+	rules := []string{
+		"一条证据只适用于它实际查询的领域",
+		"跨领域结论必须分别获得每个相关领域的有效证据",
+		"内部文档和手册只能证明规范或建议",
+		`data_status="empty"`,
+		"超出证据范围的内容必须放入“未验证/证据缺口”",
+	}
+	for _, rule := range rules {
+		if !strings.Contains(prompt, rule) {
+			t.Fatalf("coordinator prompt is missing evidence scope rule %q", rule)
+		}
+	}
+}
+
+func TestDomainAgentInstructionsOwnLeafToolRules(t *testing.T) {
+	tests := []struct {
+		name        string
+		instruction string
+		want        []string
+	}{
+		{
+			name:        "payment",
+			instruction: paymentAgentInstruction,
+			want:        []string{"query_payment_anomaly", "query_payment_metrics", "query_payment_order_detail"},
+		},
+		{
+			name:        "database",
+			instruction: databaseAgentInstruction,
+			want:        []string{"mysql_slow_sql", "performance_schema"},
+		},
+		{
+			name:        "knowledge",
+			instruction: knowledgeAgentInstruction,
+			want:        []string{"query_internal_docs", "untrusted evidence"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, want := range tt.want {
+				if !strings.Contains(tt.instruction, want) {
+					t.Fatalf("%s agent instruction is missing %q", tt.name, want)
+				}
+			}
+		})
+	}
+}

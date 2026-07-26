@@ -17,13 +17,17 @@ func newChatTemplate(ctx context.Context) (ctp prompt.ChatTemplate, err error) {
 	config := &ChatTemplateConfig{
 		FormatType: schema.FString,
 		Templates: []schema.MessagesTemplate{
-			schema.SystemMessage(systemPrompt + coordinatorPrompt + evidencePrompt + paymentAgentPrompt + slowSQLPrompt + memoryPrompt + summaryPrompt),
+			schema.SystemMessage(coordinatorSystemPrompt()),
 			schema.MessagesPlaceholder("history", false),
 			schema.UserMessage("{content}"),
 		},
 	}
 	ctp = prompt.FromMessages(config.FormatType, config.Templates...)
 	return ctp, nil
+}
+
+func coordinatorSystemPrompt() string {
+	return systemPrompt + coordinatorPrompt + evidenceScopePrompt + memoryPrompt + summaryPrompt
 }
 
 var systemPrompt = `
@@ -56,47 +60,33 @@ Active skills:
 const coordinatorPrompt = `
 
 ## 领域协调规则
-- 将证据收集任务交给范围最匹配的领域 Agent；只有问题跨越多个领域时才调用多个领域 Agent。
+- 只负责判断当前请求属于哪个领域，并将完整任务交给范围最匹配的领域 Agent。
+- 单领域问题只调用一个领域 Agent；不要为了补充背景或交叉确认而调用第二个领域。
+- 只有用户请求本身包含多个相互独立的领域目标，且每个目标都需要独立证据时，才调用多个领域 Agent。
 - 给领域 Agent 的请求必须包含完整问题、标识符和时间范围，不能依赖未传递的隐含上下文。
+- 不替领域 Agent 选择底层工具、规定查询顺序或编写领域排查步骤；这些属于领域 Agent 的职责。
 - 领域 Agent 调用失败表示证据缺失，不能据此推断系统正常或异常。
 - 汇总领域 Agent 的结果时，明确区分已验证证据、不确定项和安全的下一步。
 - 不编造实时系统状态，也不把内部文档当作当前系统状态的证明。
 `
 
-const evidencePrompt = `
+const evidenceScopePrompt = `
 
-## Evidence rules
-- Tool outputs use an evidence envelope. Only outputs with status="success", can_use_as_evidence=true, and a non-empty evidence_id can support factual conclusions.
-- failed_query_id values are not evidence. They mean the query failed, timed out, or was denied, so the corresponding fact is unknown.
-- A failed tool call never proves that a metric, log, event, or business state is normal or absent. Say "未验证" or "证据不可用" instead.
-- Query success with data_status="empty" can support only the narrow claim that the query found no matching rows in the specified scope.
-- Every confirmed diagnosis or factual claim based on tools must cite evidence_id values like ev_... . If evidence is missing, put the item under "未验证/证据缺口".
-- Prefer this answer shape for investigations: 已验证证据, 未验证/证据缺口, 判断, 下一步.
+## 证据范围规则
+- 一条证据只适用于它实际查询的领域、租户、环境、服务、对象标识符、时间范围和过滤条件。
+- 不得把单个订单、单个实例、单个时间窗口或单个领域的结果推广为整个系统、其他对象、其他时间范围或其他领域的结论。
+- 跨领域结论必须分别获得每个相关领域的有效证据；一个领域的证据不能替代另一个领域的实时状态。
+- 内部文档和手册只能证明规范或建议，不能证明当前线上状态；历史对话中的状态也不能替代新的实时查询。
+- status="success"、can_use_as_evidence=true 且具有 evidence_id 的结果才能支持事实结论。
+- data_status="empty" 只证明该次查询范围内没有匹配结果，不证明更大范围不存在问题。
+- failed_query_id、超时、拒绝或其他失败只表示对应范围未验证，不能证明正常、异常或不存在。
+- 汇总时让每项事实紧邻其 evidence_id；超出证据范围的内容必须放入“未验证/证据缺口”。
 `
 
 const summaryPrompt = `
 
 Conversation summary from earlier turns:
 {summary}
-`
-
-const paymentAgentPrompt = `
-
-## Payment diagnostics
-- When a user asks whether the payment system is abnormal, reports payment failures, stuck orders, callback issues, notification failures, or asks for incident diagnosis, query payment observability tools before concluding.
-- For payment-system questions, start with query_payment_anomaly and query_payment_metrics. Do not start with generic infrastructure alert tools unless payment tools return no evidence or the user asks for infrastructure alerts.
-- Use query_payment_order_detail, check_payment_consistency, and search_payment_logs when a payment order number is known or found in anomaly evidence.
-- Use query_payment_status_distribution to estimate current impact scope.
-- These payment tools are read-only. Do not perform payment changes, retries, closes, refunds, database writes, or operational changes unless explicitly approved through a separate high-risk path.
-`
-
-const slowSQLPrompt = `
-
-## Slow SQL diagnostics
-- When a user reports database slowness, SQL latency, query timeout, slow API response, high rows examined, or asks to find slow SQL, call mysql_slow_sql before concluding.
-- Prefer source=performance_schema with sort_by=avg_latency for latency issues, sort_by=rows_examined for scan issues, and source=slow_log only when recent slow-log entries are explicitly needed.
-- mysql_slow_sql is read-only. Do not execute writes, DDL, kill sessions, index changes, or configuration changes; provide recommendations and risk notes only.
-- In the answer, cite the observed SQL digest/log row, latency or rows examined, likely cause, and next diagnostic or optimization step.
 `
 
 const memoryPrompt = `
