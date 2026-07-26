@@ -15,7 +15,7 @@ English documentation: [README_EN.md](README_EN.md)
 - 数据库诊断工具：支持 MySQL 只读查询、慢 SQL 诊断和写操作策略保护。
 - 知识检索：支持本地 Markdown 文档切分，以及 Milvus Dense + BM25 + RRF 混合召回和外部 reranker。
 - 会话记忆：支持对话历史、摘要、会话状态、长期记忆和工具结果持久化。
-- 评估框架：支持 mock / smoke 模式，输出 JSONL 和 Markdown 报告。
+- 评估框架：支持 Contract、Routing 和 Smoke 三种模式，输出逐次 Trace、质量评分、调用成本和稳定性报告。
 
 ## 当前架构
 
@@ -23,9 +23,7 @@ English documentation: [README_EN.md](README_EN.md)
 flowchart LR
     API["Chat HTTP API"] --> Graph["Eino Chat Graph"]
     Graph --> Context["项目上下文 / Skills / 会话记忆"]
-    Graph --> Retrieval["Milvus Dense + BM25 -> RRF -> Reranker"]
     Context --> Prompt["Chat Template"]
-    Retrieval --> Prompt
     Prompt --> Coordinator["SRE 协调 Agent"]
     Coordinator --> General["通用工具：时间"]
     Coordinator --> Observability["可观测性 Agent"]
@@ -36,9 +34,10 @@ flowchart LR
     Database --> DTools["MySQL / 慢 SQL"]
     Payment --> PTools["异常 / 订单 / 一致性 / 日志 / 状态分布"]
     Knowledge --> KTools["内部文档检索"]
+    KTools --> Retrieval["Milvus Dense + BM25 -> RRF -> Reranker"]
 ```
 
-协调 Agent 不直接持有所有底层工具。工具注册表先执行角色权限过滤，再按领域构建 AgentTool；没有可用工具的领域不会暴露给当前用户。模型重试、Failover 和动态 Tool Search 会分别应用到协调 Agent 与领域 Agent。计划执行流水线暂不拆分，避免把所有流程一次性多 Agent 化。
+协调 Agent 不直接持有所有底层工具，也不携带各领域的工具选择和排查顺序；它只负责选择领域并约束证据范围。支付、数据库、可观测性和知识检索的内部规则分别由对应领域 Agent 持有。工具注册表先执行角色权限过滤，再按领域构建 AgentTool；没有可用工具的领域不会暴露给当前用户。模型重试、Failover 和动态 Tool Search 会分别应用到协调 Agent 与领域 Agent。计划执行流水线暂不拆分，避免把所有流程一次性多 Agent 化。
 
 ## 项目结构
 
@@ -74,8 +73,6 @@ utility/                      客户端、记忆、通用工具和中间件
 ```yaml
 agent:
   invoke_model_retries: 1
-  domain_agents:
-    enabled: true
   failover:
     enabled: false
   tool_search:
@@ -197,16 +194,30 @@ go run ./internal/ai/cmd/knowledge_cmd -docs testdata/eval/fixtures
 
 ## 评估
 
-运行 mock 评估：
+首先运行确定性单元测试：
 
 ```bash
-go run ./internal/ai/cmd/eval_cmd -mode mock -cases testdata/eval/chat_cases.jsonl
+go test ./...
 ```
 
-运行 smoke 评估：
+运行 Contract 评估。模型行为由 `model_steps` 明确给出，用于验证 Agent 编排、工具执行、证据、失败降级和 failover；`expected` 不会驱动模型：
 
 ```bash
-go run ./internal/ai/cmd/eval_cmd -mode smoke -cases testdata/eval/smoke_cases.jsonl
+go run ./internal/ai/cmd/eval_cmd -mode contract
 ```
 
-评估输出默认写入 `reports/`，该目录被 Git 忽略。
+运行 Routing 评估。它使用 `config.local.yaml` 中的真实模型，但所有工具都使用固定 fixture；默认每条用例运行 3 次，质量门槛为 90%：
+
+```bash
+go run ./internal/ai/cmd/eval_cmd -mode routing
+```
+
+运行端到端 Smoke 评估：
+
+```bash
+go run ./internal/ai/cmd/eval_cmd -mode smoke
+```
+
+可通过 `-repetitions`、`-case-timeout` 和 `-min-pass-rate` 调整重复次数、单用例超时和质量门槛。Safety 类用例任何一次失败都会单独阻断质量门槛。模型或工具 API 失败会记录为该次用例的失败结果，其他用例仍会继续执行。评估输出默认写入 `reports/`，该目录被 Git 忽略。
+
+主观答案质量默认不调用额外模型。只有用例配置了 `judge_criteria` 且命令显式添加 `-judge` 时，才会启用语义 Judge；路由、工具、参数、证据 ID、调用次数和安全规则始终由确定性代码评分。

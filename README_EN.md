@@ -15,7 +15,7 @@ SREagent is a backend service for SRE and OnCall troubleshooting. It focuses on 
 - Database diagnostics for MySQL read queries, slow SQL inspection, and write-operation safeguards.
 - Knowledge retrieval from local Markdown files with Milvus Dense + BM25 + RRF hybrid recall and the existing external reranker.
 - Conversation memory with history, summaries, session state, durable memory, and persisted tool results.
-- Evaluation framework with mock and smoke modes, producing JSONL and Markdown reports.
+- Evaluation framework with Contract, Routing, and Smoke modes, producing per-attempt traces, quality scores, call-cost metrics, and stability reports.
 
 ## Current Architecture
 
@@ -23,9 +23,7 @@ SREagent is a backend service for SRE and OnCall troubleshooting. It focuses on 
 flowchart LR
     API["Chat HTTP API"] --> Graph["Eino Chat Graph"]
     Graph --> Context["Project context / Skills / Conversation memory"]
-    Graph --> Retrieval["Milvus Dense + BM25 -> RRF -> Reranker"]
     Context --> Prompt["Chat Template"]
-    Retrieval --> Prompt
     Prompt --> Coordinator["SRE Coordinator Agent"]
     Coordinator --> General["General tool: time"]
     Coordinator --> Observability["Observability Agent"]
@@ -36,9 +34,10 @@ flowchart LR
     Database --> DTools["MySQL / Slow SQL"]
     Payment --> PTools["Anomalies / Orders / Consistency / Logs / Status"]
     Knowledge --> KTools["Internal documentation retrieval"]
+    KTools --> Retrieval["Milvus Dense + BM25 -> RRF -> Reranker"]
 ```
 
-The coordinator does not hold every leaf tool. The registry first applies role-based authorization, then builds one AgentTool per non-empty domain. Retry, failover, and dynamic Tool Search apply independently to the coordinator and domain agents. The plan/execute pipeline remains unchanged so the project evolves incrementally instead of turning every flow into a multi-agent system at once.
+The coordinator neither holds every leaf tool nor carries domain-specific tool selection and investigation order. It only selects the domain and enforces evidence scope. Payment, database, observability, and knowledge rules live in their corresponding domain agents. The registry first applies role-based authorization, then builds one AgentTool per non-empty domain. Retry, failover, and dynamic Tool Search apply independently to the coordinator and domain agents. The plan/execute pipeline remains unchanged so the project evolves incrementally instead of turning every flow into a multi-agent system at once.
 
 ## Repository Layout
 
@@ -74,8 +73,6 @@ The default configuration lives at `manifest/config/config.yaml`. Adjust it befo
 ```yaml
 agent:
   invoke_model_retries: 1
-  domain_agents:
-    enabled: true
   failover:
     enabled: false
   tool_search:
@@ -191,17 +188,31 @@ By default, it reads `docs/` from the current working directory. Since `docs/` i
 
 ## Evaluation
 
-Run mock evaluation:
+Start with deterministic unit tests:
 
 ```bash
-go run ./internal/ai/cmd/eval_cmd -mode mock -cases testdata/eval/chat_cases.jsonl
+go test ./...
 ```
 
-Run smoke evaluation:
+Run Contract evaluation. `model_steps` explicitly controls model behavior to test orchestration, tool execution, evidence handling, degradation, and failover. Expected results never drive the model:
 
 ```bash
-go run ./internal/ai/cmd/eval_cmd -mode smoke -cases testdata/eval/smoke_cases.jsonl
+go run ./internal/ai/cmd/eval_cmd -mode contract
 ```
 
-Reports are written to `reports/` by default. This directory is ignored by Git.
+Run Routing evaluation. It uses the real model configured by `config.local.yaml` with deterministic fixture tools. Each case runs three times by default and the default quality gate is 90%:
+
+```bash
+go run ./internal/ai/cmd/eval_cmd -mode routing
+```
+
+Run end-to-end Smoke evaluation:
+
+```bash
+go run ./internal/ai/cmd/eval_cmd -mode smoke
+```
+
+Use `-repetitions`, `-case-timeout`, and `-min-pass-rate` to change repetition count, per-case timeout, and the quality gate. Any failed Safety attempt independently fails the gate. A model or tool API failure is recorded as that attempt's result while the remaining cases continue. Reports are written to `reports/` by default. This directory is ignored by Git.
+
+Subjective answer quality does not call another model by default. Semantic judging runs only when a case defines `judge_criteria` and the command includes `-judge`. Routing, tools, arguments, evidence IDs, call budgets, and safety rules always use deterministic scoring.
 
