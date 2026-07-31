@@ -11,6 +11,7 @@ SREagent is a backend service for SRE and OnCall troubleshooting. It focuses on 
 - Domain agents: the chat coordinator invokes focused observability, database, payment, and knowledge agents through AgentTool; each domain loads only its own tools.
 - Evidence-backed answers using alerts, metrics, logs, database results, payment observability, and knowledge retrieval.
 - Scenario-based tool registration with role-based authorization.
+- Generic MCP registration for multiple read-only MCP servers, with automatic discovery and domain/permission routing instead of one Go implementation per tool.
 - Payment diagnostics for anomalies, metrics, order details, consistency checks, logs, and status distribution.
 - Database diagnostics for MySQL read queries, slow SQL inspection, and write-operation safeguards.
 - Knowledge retrieval from local Markdown files with Milvus Dense + BM25 + RRF hybrid recall and the existing external reranker.
@@ -120,9 +121,23 @@ observability:
   insecure: true
 
 tools:
+  mcp_servers:
+    - name: "payment-platform"
+      domain: "payment"
+      url: "http://payment-mcp:8080/mcp"
+      permission: "tool:payment.read"
+      enabled: true
+      required: false
+      read_only: true
+      headers_from_env:
+        Authorization: "PAYMENT_MCP_AUTHORIZATION"
   mysql:
     allow_write: false
 ```
+
+`tools.mcp_servers` accepts the `observability`, `database`, `payment`, and `knowledge` domains. At startup or first registration, each server is queried through MCP `tools/list`. Discovered tools are named `<server_name>__<tool_name>` and passed to the matching domain agent and ToolSearch. A server is not contacted when the current principal lacks its configured permission. Optional server failures degrade gracefully, while a failed `required: true` server returns a registration error.
+
+The generic registry only accepts `read_only: true`. This is an operator declaration and cannot prove that a remote implementation has no side effects. Refunds, database writes, restarts, deployments, and other risky operations still require an explicit Go wrapper with validation, confirmation, and auditing. Header values are read only from environment variables so credentials do not need to be stored in YAML. Successfully discovered tools are cached for the process lifetime; restart the service after a tool-list change. Failed connections become retryable after a short delay.
 
 When observability is enabled, traces cover chat requests, Eino components, the Agent, knowledge retrieval, and the reranker. Core metrics include request success and latency, streaming time to first token, answer length, evidence count, failed tools, hybrid candidate count, final document count, and reranker success/latency.
 
@@ -136,9 +151,10 @@ Create the conversation memory tables:
 
 ```bash
 mysql -u root -p < manifest/sql/memory_schema.sql
+mysql -u root -p superbiz_agent < manifest/sql/watcher_schema.sql
 ```
 
-The script creates the `superbiz_agent` database and tables for conversations, summaries, session state, durable memories, and tool results.
+The scripts create the `superbiz_agent` database together with conversation-memory, detector-state, and incident tables. Existing MySQL data volumes do not rerun Docker initialization scripts, so apply the new `watcher_schema.sql` manually.
 
 ## Run The Service
 
@@ -173,6 +189,26 @@ curl -sS -X POST "http://127.0.0.1:6872/api/chat" \
     "question": "Are there any recent payment system anomalies? Provide evidence and recommendations."
   }'
 ```
+
+## Periodic Anomaly Detection
+
+The watcher is a single-replica worker separate from the HTTP service. It deterministically collects payment metrics, payment status distributions, and active Prometheus alerts. An incident opens only after the configured number of consecutive abnormal windows, and collection failures never count as recovery.
+
+Set `watch.enabled: true` in the active configuration and verify that every payment rule's `value_path` and `sample_count_path` match the real payment-observability API response. Dot paths access nested fields and may contain array indexes, for example `data.0.success_rate`.
+
+Evaluate every rule once:
+
+```bash
+go run ./internal/ai/cmd/watch_cmd -once
+```
+
+Run continuously:
+
+```bash
+go run ./internal/ai/cmd/watch_cmd
+```
+
+Deploy `watch_cmd` as a single replica in production instead of starting it in every API instance. Detector state is stored in `detector_states`; incident lifecycle and the latest evidence are stored in `incidents`. The first version implements collection, consecutive-window evaluation, incident opening/updating/resolution, and OTel metrics. Automatic domain-agent diagnosis and notifications are not included yet.
 
 ## Knowledge Indexing
 

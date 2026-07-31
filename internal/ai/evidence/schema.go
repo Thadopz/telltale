@@ -31,6 +31,7 @@ const (
 	ObservationSlowSQL            = "slow_sql"
 	ObservationRunbookRule        = "runbook_rule"
 	ObservationEmptyResult        = "empty_result"
+	ObservationMCPToolResult      = "mcp_tool_result"
 
 	CoverageCovered   = "covered"
 	CoveragePartial   = "partial"

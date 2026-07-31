@@ -85,13 +85,24 @@ skills:
   max_body_chars: 6000
 
 tools:
+  mcp_servers: []
   mysql:
     max_rows: 100
     allow_write: false
+  prometheus:
+    base_url: "http://127.0.0.1:9090"
   mcp_log:
     enabled: true
     required: false
     url: "https://YOUR_MCP_HOST/mcp"
+
+watch:
+  enabled: false
+  interval_seconds: 60
+  query_timeout_seconds: 15
+  tenant_id: "default"
+  environment: "local"
+  rules: []
 
 permissions:
   enabled: true

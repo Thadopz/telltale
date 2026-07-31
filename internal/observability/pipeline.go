@@ -31,6 +31,11 @@ var rerankDuration = mustHistogram("sreagent.knowledge.rerank.duration", "Extern
 var agentRuns = mustCounter("sreagent.agent.runs", "Completed coordinator and domain agent runs")
 var agentDuration = mustHistogram("sreagent.agent.duration", "Coordinator and domain agent run duration")
 var agentRoutes = mustCounter("sreagent.agent.routes", "Completed domain agent routing calls")
+var watchCycles = mustCounter("sreagent.watcher.cycles", "Completed anomaly watcher cycles")
+var watchCycleDuration = mustHistogram("sreagent.watcher.cycle.duration", "End-to-end anomaly watcher cycle duration")
+var watchRulesPerCycle = mustCountHistogram("sreagent.watcher.rules", "Rules evaluated per anomaly watcher cycle", "{rule}")
+var watchRuleEvaluations = mustCounter("sreagent.watcher.rule.evaluations", "Completed anomaly rule evaluations")
+var watchIncidentTransitions = mustCounter("sreagent.watcher.incident.transitions", "Incident lifecycle transitions")
 
 func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	return tracer.Start(ctx, name, trace.WithAttributes(attrs...))
@@ -99,6 +104,30 @@ func RecordAgentRoute(ctx context.Context, name string, domain string, err error
 		attribute.String("agent.target.domain", domain),
 		attribute.String("agent.route.status", statusValue(err)),
 	))
+}
+
+func RecordWatchCycle(ctx context.Context, elapsed time.Duration, ruleCount int, err error) {
+	attrs := metric.WithAttributes(attribute.String("watch.status", statusValue(err)))
+	watchCycles.Add(ctx, 1, attrs)
+	watchCycleDuration.Record(ctx, elapsedMilliseconds(elapsed), attrs)
+	watchRulesPerCycle.Record(ctx, int64(ruleCount), attrs)
+}
+
+func RecordWatchRule(ctx context.Context, ruleID string, domain string, collector string, transition string, err error) {
+	attrs := metric.WithAttributes(
+		attribute.String("watch.rule.id", ruleID),
+		attribute.String("watch.domain", domain),
+		attribute.String("watch.collector", collector),
+		attribute.String("watch.status", statusValue(err)),
+	)
+	watchRuleEvaluations.Add(ctx, 1, attrs)
+	if transition != "" {
+		watchIncidentTransitions.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("watch.rule.id", ruleID),
+			attribute.String("watch.domain", domain),
+			attribute.String("watch.transition", transition),
+		))
+	}
 }
 
 func mustCounter(name string, description string) metric.Int64Counter {

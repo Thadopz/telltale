@@ -68,6 +68,11 @@ func (r *Registry) chatTools(ctx context.Context) ([]tool.BaseTool, error) {
 // deterministic order. Empty groups are retained so configuration and tests
 // can reason about the complete domain model.
 func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error) {
+	configuredTools, err := configuredMCPDomainTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	observabilityTools, err := r.optionalLogMcpTools(ctx)
 	if err != nil {
 		return nil, err
@@ -83,6 +88,7 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 	if err = appendTool(ctx, &observabilityTools, NewPrometheusAlertsQueryTool); err != nil {
 		return nil, err
 	}
+	observabilityTools = appendUniqueTools(ctx, observabilityTools, configuredTools[DomainObservability])
 
 	var databaseTools []tool.BaseTool
 	if err = appendTool(ctx, &databaseTools, NewMysqlCrudTool); err != nil {
@@ -91,11 +97,13 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 	if err = appendTool(ctx, &databaseTools, NewMysqlSlowSQLTool); err != nil {
 		return nil, err
 	}
+	databaseTools = appendUniqueTools(ctx, databaseTools, configuredTools[DomainDatabase])
 
 	var paymentTools []tool.BaseTool
 	if err = appendPaymentAgentTools(ctx, &paymentTools); err != nil {
 		return nil, err
 	}
+	paymentTools = appendUniqueTools(ctx, paymentTools, configuredTools[DomainPayment])
 
 	var generalTools []tool.BaseTool
 	if err = appendTool(ctx, &generalTools, NewGetCurrentTimeTool); err != nil {
@@ -106,6 +114,7 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 	if err = appendTool(ctx, &knowledgeTools, NewQueryInternalDocsTool); err != nil {
 		return nil, err
 	}
+	knowledgeTools = appendUniqueTools(ctx, knowledgeTools, configuredTools[DomainKnowledge])
 
 	return []DomainToolSet{
 		{Domain: DomainGeneral, Tools: generalTools},
@@ -117,6 +126,11 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 }
 
 func (r *Registry) aiOpsTools(ctx context.Context) ([]tool.BaseTool, error) {
+	configuredTools, err := configuredMCPDomainTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	toolList, err := r.optionalLogMcpTools(ctx)
 	if err != nil {
 		return nil, err
@@ -143,6 +157,9 @@ func (r *Registry) aiOpsTools(ctx context.Context) ([]tool.BaseTool, error) {
 	}
 	if err = appendTool(ctx, &toolList, NewGetCurrentTimeTool); err != nil {
 		return nil, err
+	}
+	for _, domain := range []Domain{DomainObservability, DomainDatabase, DomainPayment, DomainKnowledge} {
+		toolList = appendUniqueTools(ctx, toolList, configuredTools[domain])
 	}
 	return toolList, nil
 }

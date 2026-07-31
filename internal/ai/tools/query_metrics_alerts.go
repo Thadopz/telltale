@@ -7,10 +7,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/gogf/gf/v2/frame/g"
 )
 
 // PrometheusAlert 告警信息结构
@@ -50,8 +52,8 @@ type PrometheusAlertsOutput struct {
 }
 
 // queryPrometheusAlerts 查询Prometheus告警
-func queryPrometheusAlerts() (PrometheusAlertsResult, error) {
-	baseURL := "http://127.0.0.1:9090"
+func queryPrometheusAlerts(ctx context.Context) (PrometheusAlertsResult, error) {
+	baseURL := prometheusBaseURL(ctx)
 	apiURL := fmt.Sprintf("%s/api/v1/alerts", baseURL)
 
 	log.Printf("Querying Prometheus alerts: %s", apiURL)
@@ -117,7 +119,7 @@ func NewPrometheusAlertsQueryTool() (tool.InvokableTool, error) {
 			log.Printf("Querying Prometheus active alerts")
 
 			// 调用Prometheus Alerts API
-			result, err := queryPrometheusAlerts()
+			result, err := queryPrometheusAlerts(ctx)
 			if err != nil {
 				return marshalToolError(err, "failed to query Prometheus alerts"), nil
 			}
@@ -160,4 +162,15 @@ func NewPrometheusAlertsQueryTool() (tool.InvokableTool, error) {
 		log.Fatal(err)
 	}
 	return t, err
+}
+
+func prometheusBaseURL(ctx context.Context) string {
+	value, err := g.Cfg().Get(ctx, "tools.prometheus.base_url")
+	if err == nil && value != nil {
+		baseURL := strings.TrimRight(strings.TrimSpace(value.String()), "/")
+		if baseURL != "" {
+			return baseURL
+		}
+	}
+	return "http://127.0.0.1:9090"
 }

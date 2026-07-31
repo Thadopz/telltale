@@ -17,6 +17,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mysql:/var/lib/mysql
       - ../sql/memory_schema.sql:/docker-entrypoint-initdb.d/01-memory_schema.sql:ro
+      - ../sql/watcher_schema.sql:/docker-entrypoint-initdb.d/02-watcher_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -usuperbiz -psuperbiz --silent"]
       interval: 10s

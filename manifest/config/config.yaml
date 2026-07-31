@@ -99,9 +99,12 @@ project_context:
 tools:
   call_timeout_seconds: 30
   mcp_registration_timeout_seconds: 30
+  mcp_servers: []
   mysql:
     max_rows: 100
     allow_write: false
+  prometheus:
+    base_url: "http://127.0.0.1:9090"
   mcp_log:
     enabled: true
     required: false
@@ -118,6 +121,52 @@ tools:
     prometheus_mcp_url: ""
     jaeger_mcp_url: ""
     submit_mcp_url: ""
+
+watch:
+  enabled: false
+  interval_seconds: 60
+  query_timeout_seconds: 15
+  tenant_id: "default"
+  environment: "local"
+  rules:
+    - id: "payment-success-rate"
+      domain: "payment"
+      collector: "payment_metric"
+      service: "payment"
+      metric: "payment_success_rate"
+      window_minutes: 5
+      value_path: "data.success_rate"
+      sample_count_path: "data.total"
+      operator: "lt"
+      threshold: 0.98
+      minimum_samples: 100
+      severity: "critical"
+      firing_windows: 3
+      recovery_windows: 2
+    - id: "payment-pending-ratio"
+      domain: "payment"
+      collector: "payment_status_distribution"
+      service: "payment"
+      window_minutes: 10
+      value_path: "data.pending_ratio"
+      sample_count_path: "data.total"
+      operator: "gt"
+      threshold: 0.10
+      minimum_samples: 50
+      severity: "warning"
+      firing_windows: 3
+      recovery_windows: 2
+    - id: "active-prometheus-alerts"
+      domain: "observability"
+      collector: "prometheus_alerts"
+      service: "prometheus"
+      window_minutes: 5
+      value_path: "alerts"
+      operator: "count_gt"
+      threshold: 0
+      severity: "critical"
+      firing_windows: 2
+      recovery_windows: 2
 
 permissions:
   enabled: true

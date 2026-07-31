@@ -11,6 +11,7 @@ English documentation: [README_EN.md](README_EN.md)
 - 领域 Agent：聊天协调 Agent 通过 AgentTool 按需调用可观测性、数据库、支付和知识四个领域 Agent；每个领域只加载自己的工具。
 - 证据驱动回答：优先使用告警、指标、日志、数据库、支付观测和知识库结果。
 - 工具注册与权限控制：按场景注册工具，并通过角色范围限制高风险能力。
+- 通用 MCP 注册：通过配置连接多个只读 MCP Server，自动发现工具并按领域、权限加载，无需逐个编写 Go Tool。
 - 支付诊断工具：支持异常、指标、订单详情、一致性、日志和状态分布查询。
 - 数据库诊断工具：支持 MySQL 只读查询、慢 SQL 诊断和写操作策略保护。
 - 知识检索：支持本地 Markdown 文档切分，以及 Milvus Dense + BM25 + RRF 混合召回和外部 reranker。
@@ -120,9 +121,23 @@ observability:
   insecure: true
 
 tools:
+  mcp_servers:
+    - name: "payment-platform"
+      domain: "payment"
+      url: "http://payment-mcp:8080/mcp"
+      permission: "tool:payment.read"
+      enabled: true
+      required: false
+      read_only: true
+      headers_from_env:
+        Authorization: "PAYMENT_MCP_AUTHORIZATION"
   mysql:
     allow_write: false
 ```
+
+`tools.mcp_servers` 支持 `observability`、`database`、`payment` 和 `knowledge` 四个领域。服务启动或首次注册时会通过 MCP `tools/list` 自动发现工具，并以 `<server_name>__<tool_name>` 命名后交给对应领域 Agent 和 ToolSearch。权限不足时不会连接该服务器；可选服务器不可用时会降级跳过，`required: true` 的服务器不可用时会返回注册错误。
+
+通用注册器只接受 `read_only: true`。该字段是部署方对 MCP Server 的安全声明，并不能自动证明远端实现没有副作用；退款、写数据库、重启和发布等高风险能力仍应使用带参数校验、确认和审计策略的显式 Go 包装器。Header 值只从环境变量读取，避免把令牌写入 YAML。成功发现的工具会在进程内缓存；工具清单变化后需要重启服务，连接失败则会在短时间后允许重试。
 
 启用观测后，Trace 会覆盖聊天请求、Eino 组件、Agent、知识检索和 reranker。核心指标包括请求成功率与耗时、流式首 Token 延迟、回答长度、证据数量、工具失败数、混合召回候选数、最终文档数和 reranker 成功率/耗时。
 
@@ -136,9 +151,10 @@ Agent 级指标包括 `sreagent.agent.runs`、`sreagent.agent.duration` 和 `sre
 
 ```bash
 mysql -u root -p < manifest/sql/memory_schema.sql
+mysql -u root -p superbiz_agent < manifest/sql/watcher_schema.sql
 ```
 
-该脚本会创建 `superbiz_agent` 数据库以及对话、摘要、会话状态、长期记忆和工具结果表。
+这些脚本会创建 `superbiz_agent` 数据库，以及对话记忆、异常检测状态和 Incident 表。已有 MySQL 数据卷不会重新执行 Docker 初始化脚本，需要手动运行新增的 `watcher_schema.sql`。
 
 ## 运行服务
 
@@ -173,6 +189,26 @@ curl -sS -X POST "http://127.0.0.1:6872/api/chat" \
     "question": "支付系统最近是否有异常？请给出证据和建议。"
   }'
 ```
+
+## 周期异常检测
+
+Watcher 是独立于 HTTP 服务的单副本 Worker。它确定性地采集支付指标、支付状态分布和 Prometheus 活跃告警；只有连续异常窗口达到阈值时才创建 Incident，采集失败不会被当成恢复。
+
+先在当前生效的配置文件中设置 `watch.enabled: true` 并确认每条支付规则的 `value_path`、`sample_count_path` 与支付观测 API 的实际 JSON 响应一致。路径使用点号访问嵌套字段，也支持数组下标，例如 `data.0.success_rate`。
+
+单次执行所有规则：
+
+```bash
+go run ./internal/ai/cmd/watch_cmd -once
+```
+
+持续执行：
+
+```bash
+go run ./internal/ai/cmd/watch_cmd
+```
+
+生产环境应把 `watch_cmd` 部署为单副本进程，不要在每个 API 实例里同时启动。状态保存在 `detector_states`，异常生命周期和最新证据保存在 `incidents`。第一版完成采集、连续窗口判断、Incident 打开/更新/恢复和 OTel 指标，尚未自动调用领域 Agent 生成诊断或发送通知。
 
 ## 知识库索引
 

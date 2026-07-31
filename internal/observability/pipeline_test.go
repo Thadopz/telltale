@@ -20,6 +20,8 @@ func TestAgentMetricsAreExported(t *testing.T) {
 	ctx := context.Background()
 	RecordAgentRun(ctx, "payment_agent", "payment", "domain", false, 25*time.Millisecond, nil)
 	RecordAgentRoute(ctx, "payment_agent", "payment", errors.New("route failed"))
+	RecordWatchRule(ctx, "payment-success-rate", "payment", "payment_metric", "opened", nil)
+	RecordWatchCycle(ctx, 30*time.Millisecond, 3, nil)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &metrics); err != nil {
@@ -31,6 +33,11 @@ func TestAgentMetricsAreExported(t *testing.T) {
 		"sreagent.agent.runs",
 		"sreagent.agent.duration",
 		"sreagent.agent.routes",
+		"sreagent.watcher.cycles",
+		"sreagent.watcher.cycle.duration",
+		"sreagent.watcher.rules",
+		"sreagent.watcher.rule.evaluations",
+		"sreagent.watcher.incident.transitions",
 	} {
 		if !names[expected] {
 			t.Fatalf("expected metric %s, got %#v", expected, names)
