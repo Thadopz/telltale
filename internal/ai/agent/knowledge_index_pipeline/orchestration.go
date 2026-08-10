@@ -11,7 +11,7 @@ func BuildKnowledgeIndexing(ctx context.Context) (r compose.Runnable[document.So
 	const (
 		FileLoader       = "FileLoader"
 		MarkdownSplitter = "MarkdownSplitter"
-		MilvusIndexer    = "MilvusIndexer"
+		SQLiteIndexer    = "SQLiteIndexer"
 	)
 	g := compose.NewGraph[document.Source, []string]()
 	fileLoaderKeyOfLoader, err := newLoader(ctx)
@@ -24,15 +24,15 @@ func BuildKnowledgeIndexing(ctx context.Context) (r compose.Runnable[document.So
 		return nil, err
 	}
 	_ = g.AddDocumentTransformerNode(MarkdownSplitter, markdownSplitterKeyOfDocumentTransformer)
-	milvusIndexerKeyOfIndexer, err := newIndexer(ctx)
+	sqliteIndexerKeyOfIndexer, err := newIndexer(ctx)
 	if err != nil {
 		return nil, err
 	}
-	_ = g.AddIndexerNode(MilvusIndexer, milvusIndexerKeyOfIndexer)
+	_ = g.AddIndexerNode(SQLiteIndexer, sqliteIndexerKeyOfIndexer)
 	_ = g.AddEdge(compose.START, FileLoader)
-	_ = g.AddEdge(MilvusIndexer, compose.END)
+	_ = g.AddEdge(SQLiteIndexer, compose.END)
 	_ = g.AddEdge(FileLoader, MarkdownSplitter)
-	_ = g.AddEdge(MarkdownSplitter, MilvusIndexer)
+	_ = g.AddEdge(MarkdownSplitter, SQLiteIndexer)
 	r, err = g.Compile(ctx, compose.WithGraphName("KnowledgeIndexing"), compose.WithNodeTriggerMode(compose.AnyPredecessor))
 	if err != nil {
 		return nil, err

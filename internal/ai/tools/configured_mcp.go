@@ -1,12 +1,14 @@
 package tools
 
 import (
-	"SREagent/internal/ai/evidence"
-	"SREagent/internal/authz"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/authz"
 	"os"
 	"sort"
 	"strings"
@@ -18,26 +20,40 @@ import (
 	"github.com/gogf/gf/v2/frame/g"
 )
 
-const configuredMCPErrorCacheTTL = 30 * time.Second
+const (
+	configuredMCPErrorCacheTTL       = 30 * time.Second
+	configuredMCPCircuitThreshold    = 3
+	configuredMCPCircuitBaseBackoff  = 5 * time.Second
+	configuredMCPCircuitMaximumDelay = 2 * time.Minute
+)
 
 type MCPServerConfig struct {
-	Name           string            `json:"name"`
-	Domain         Domain            `json:"domain"`
-	URL            string            `json:"url"`
-	Permission     authz.Permission  `json:"permission"`
-	Enabled        bool              `json:"enabled"`
-	Required       bool              `json:"required"`
-	ReadOnly       bool              `json:"read_only"`
-	HeadersFromEnv map[string]string `json:"headers_from_env"`
+	Name           string             `json:"name"`
+	Domain         Domain             `json:"domain"`
+	URL            string             `json:"url"`
+	Permission     authz.Permission   `json:"permission"`
+	AgentScopes    []authz.AgentScope `json:"agent_scopes"`
+	Enabled        bool               `json:"enabled"`
+	Required       bool               `json:"required"`
+	ReadOnly       bool               `json:"read_only"`
+	TimeoutSeconds int                `json:"timeout"`
+	MaxOutputBytes int                `json:"max_output_bytes"`
+	SchemaVersion  string             `json:"schema_version"`
+	HeadersFromEnv map[string]string  `json:"headers_from_env"`
 }
 
 type mcpServerToolLoader func(context.Context, MCPServerConfig, map[string]string) ([]tool.BaseTool, error)
 
 type configuredMCPTool struct {
-	inner      tool.InvokableTool
-	info       *schema.ToolInfo
-	serverName string
-	domain     Domain
+	inner          tool.InvokableTool
+	info           *schema.ToolInfo
+	serverName     string
+	domain         Domain
+	timeout        time.Duration
+	maxOutputBytes int
+	agentScopes    []authz.AgentScope
+	circuitKey     string
+	schemaVersion  string
 }
 
 type configuredMCPCacheEntry struct {
@@ -53,17 +69,43 @@ var configuredMCPCache = struct {
 	entries: make(map[string]configuredMCPCacheEntry),
 }
 
+type configuredMCPCircuitEntry struct {
+	failures  int
+	openUntil time.Time
+}
+
+var configuredMCPCircuits = struct {
+	sync.Mutex
+	entries map[string]configuredMCPCircuitEntry
+}{
+	entries: make(map[string]configuredMCPCircuitEntry),
+}
+
 func (t *configuredMCPTool) Info(context.Context) (*schema.ToolInfo, error) {
 	return t.info, nil
 }
 
 func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON string, options ...tool.Option) (string, error) {
-	output, err := t.inner.InvokableRun(ctx, argumentsInJSON, options...)
+	if delay, open := configuredMCPCircuitDelay(t.circuitKey); open {
+		message := fmt.Sprintf("MCP server %s circuit is open; retry after %s", t.serverName, delay.Round(time.Second))
+		return marshalToolError(errors.New(message), "MCP server temporarily unavailable"), nil
+	}
+	output, err := invokeToolWithPolicyTimeout(ctx, t.inner, t.info.Name, argumentsInJSON, t.timeout, ExecutionPolicy{ReadOnly: true, Cancellable: true, Idempotent: true}, "", options...)
 	if err != nil {
+		recordConfiguredMCPFailure(t.circuitKey)
 		return marshalToolError(err, "MCP tool "+t.info.Name+" failed"), nil
 	}
+	if t.maxOutputBytes > 0 && len(output) > t.maxOutputBytes {
+		recordConfiguredMCPFailure(t.circuitKey)
+		return marshalToolError(fmt.Errorf("MCP output exceeds %d bytes", t.maxOutputBytes), "MCP tool output rejected by size policy"), nil
+	}
+	if evidence.Parse(output).Envelope.Status != evidence.StatusSuccess {
+		recordConfiguredMCPFailure(t.circuitKey)
+	} else {
+		recordConfiguredMCPSuccess(t.circuitKey)
+	}
 	message := "MCP tool " + t.info.Name + " returned output"
-	return marshalToolEvidence(output, message, []evidence.Observation{{
+	observation := evidence.Observation{
 		Kind: evidence.ObservationMCPToolResult,
 		Subject: evidence.SubjectRef{
 			Type:    string(t.domain),
@@ -73,11 +115,56 @@ func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON st
 		Scope: evidence.EvidenceScope{Fields: map[string]string{
 			"server":         t.serverName,
 			"tool":           t.info.Name,
+			"schema_version": t.schemaVersion,
 			"arguments_hash": authz.HashArguments(argumentsInJSON),
 		}},
-		Fields:  map[string]any{"server": t.serverName, "tool": t.info.Name, "domain": t.domain},
+		Fields:  map[string]any{"server": t.serverName, "tool": t.info.Name, "domain": t.domain, "schema_version": t.schemaVersion, "source": "mcp"},
 		Summary: message,
-	}}), nil
+	}
+	if structured, ok := structuredMCPEvidence(output); ok {
+		structured.TrustLevel = evidence.ContentTrustUntrustedExternal
+		structured.Observations = append(structured.Observations, observation)
+		if strings.TrimSpace(structured.Message) == "" {
+			structured.Message = message
+		}
+		if strings.TrimSpace(structured.Summary) == "" {
+			structured.Summary = structured.Message
+		}
+		return evidence.Marshal(structured), nil
+	}
+	env := evidence.NewDataWithObservations(output, message, []evidence.Observation{observation})
+	env.TrustLevel = evidence.ContentTrustUntrustedExternal
+	return evidence.Marshal(env), nil
+}
+
+// structuredMCPEvidence accepts an MCP text result whose text is a standard
+// Evidence Envelope. Plain MCP results keep the legacy generic wrapper above.
+// This makes configured MCP servers able to preserve source type, runtime
+// verification, and observation kinds without trusting arbitrary prose.
+func structuredMCPEvidence(output string) (evidence.Envelope, bool) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil || result.IsError {
+		return evidence.Envelope{}, false
+	}
+	for _, block := range result.Content {
+		if strings.TrimSpace(block.Text) == "" {
+			continue
+		}
+		parsed := evidence.Parse(block.Text)
+		envelope := parsed.Envelope
+		if !parsed.IsJSON || envelope.Status != evidence.StatusSuccess ||
+			envelope.EvidenceID == "" || !envelope.CanUseAsEvidence {
+			continue
+		}
+		return envelope, true
+	}
+	return evidence.Envelope{}, false
 }
 
 func configuredMCPDomainTools(ctx context.Context) (map[Domain][]tool.BaseTool, error) {
@@ -114,6 +201,7 @@ func loadConfiguredMCPServers(
 		if !config.Enabled {
 			continue
 		}
+		config = normalizeMCPServerConfig(config)
 		config.Name = strings.TrimSpace(config.Name)
 		config.Domain = Domain(strings.ToLower(strings.TrimSpace(string(config.Domain))))
 		config.URL = strings.TrimSpace(config.URL)
@@ -169,6 +257,31 @@ func loadConfiguredMCPServers(
 	return toolsByDomain, nil
 }
 
+func normalizeMCPServerConfig(config MCPServerConfig) MCPServerConfig {
+	if len(config.AgentScopes) == 0 {
+		switch config.Domain {
+		case DomainPayment:
+			config.AgentScopes = []authz.AgentScope{authz.AgentScopePayment}
+		case DomainDatabase:
+			config.AgentScopes = []authz.AgentScope{authz.AgentScopeDatabase}
+		case DomainKnowledge:
+			config.AgentScopes = []authz.AgentScope{authz.AgentScopeKnowledge}
+		case DomainObservability:
+			config.AgentScopes = []authz.AgentScope{authz.AgentScopeObservability}
+		}
+	}
+	if config.TimeoutSeconds <= 0 {
+		config.TimeoutSeconds = 30
+	}
+	if config.MaxOutputBytes <= 0 {
+		config.MaxOutputBytes = 64 * 1024
+	}
+	if strings.TrimSpace(config.SchemaVersion) == "" {
+		config.SchemaVersion = "1"
+	}
+	return config
+}
+
 func validateMCPServerConfig(config MCPServerConfig, seenNames map[string]bool) error {
 	config.Name = strings.TrimSpace(config.Name)
 	if config.Name == "" {
@@ -189,12 +302,38 @@ func validateMCPServerConfig(config MCPServerConfig, seenNames map[string]bool) 
 	if !config.ReadOnly {
 		return fmt.Errorf("mcp server %s must declare read_only=true; write or destructive tools require an explicit Go policy wrapper", config.Name)
 	}
+	if config.TimeoutSeconds <= 0 {
+		config.TimeoutSeconds = 30
+	}
+	if config.TimeoutSeconds > 300 {
+		return fmt.Errorf("mcp server %s timeout must be between 1 and 300 seconds", config.Name)
+	}
+	if config.MaxOutputBytes <= 0 {
+		config.MaxOutputBytes = 64 * 1024
+	}
+	if config.MaxOutputBytes > 4*1024*1024 {
+		return fmt.Errorf("mcp server %s max_output_bytes is too large", config.Name)
+	}
+	if strings.TrimSpace(config.SchemaVersion) == "" {
+		return fmt.Errorf("mcp server %s has no schema_version", config.Name)
+	}
 	switch config.Domain {
 	case DomainObservability, DomainDatabase, DomainPayment, DomainKnowledge:
-		return nil
+		break
 	default:
 		return fmt.Errorf("mcp server %s has unsupported domain %q", config.Name, config.Domain)
 	}
+	if len(config.AgentScopes) == 0 {
+		return fmt.Errorf("mcp server %s has no agent_scopes", config.Name)
+	}
+	for _, scope := range config.AgentScopes {
+		switch scope {
+		case authz.AgentScopePayment, authz.AgentScopeObservability, authz.AgentScopeDatabase, authz.AgentScopeKnowledge:
+		default:
+			return fmt.Errorf("mcp server %s has unsupported agent scope %q", config.Name, scope)
+		}
+	}
+	return nil
 }
 
 func mcpHeadersFromEnv(headerEnvNames map[string]string) (map[string]string, error) {
@@ -231,7 +370,7 @@ func cachedConfiguredMCPTools(ctx context.Context, config MCPServerConfig, heade
 	}
 	configuredMCPCache.Unlock()
 
-	discoveredTools, err := loadStreamableHTTPMCPTools(ctx, config.URL, headers, "sreagent-"+normalizeMCPServerName(config.Name))
+	discoveredTools, err := loadStreamableHTTPMCPTools(ctx, config.URL, headers, "telltale-"+normalizeMCPServerName(config.Name))
 	entry = configuredMCPCacheEntry{
 		tools: append([]tool.BaseTool(nil), discoveredTools...),
 		err:   err,
@@ -280,14 +419,74 @@ func wrapConfiguredMCPTools(ctx context.Context, config MCPServerConfig, discove
 		namespacedInfo := *info
 		namespacedInfo.Name = serverPrefix + "__" + info.Name
 		wrapped := &configuredMCPTool{
-			inner:      invokable,
-			info:       &namespacedInfo,
-			serverName: config.Name,
-			domain:     config.Domain,
+			inner:          invokable,
+			info:           &namespacedInfo,
+			serverName:     config.Name,
+			domain:         config.Domain,
+			timeout:        time.Duration(config.TimeoutSeconds) * time.Second,
+			maxOutputBytes: config.MaxOutputBytes,
+			agentScopes:    append([]authz.AgentScope(nil), config.AgentScopes...),
+			circuitKey:     config.Name,
+			schemaVersion:  config.SchemaVersion,
 		}
-		wrappedTools = append(wrappedTools, wrapAuthorizedToolWithPermission(wrapped, config.Permission))
+		wrappedTools = append(wrappedTools, wrapAuthorizedToolWithPolicy(wrapped, config.Permission, config.AgentScopes, ExecutionPolicy{ReadOnly: true, Cancellable: true, Idempotent: true}))
 	}
 	return wrappedTools, nil
+}
+
+func configuredMCPCircuitDelay(key string) (time.Duration, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0, false
+	}
+	now := time.Now()
+	configuredMCPCircuits.Lock()
+	defer configuredMCPCircuits.Unlock()
+	entry, ok := configuredMCPCircuits.entries[key]
+	if !ok || entry.openUntil.IsZero() {
+		return 0, false
+	}
+	if !now.Before(entry.openUntil) {
+		delete(configuredMCPCircuits.entries, key)
+		return 0, false
+	}
+	return time.Until(entry.openUntil), true
+}
+
+func recordConfiguredMCPFailure(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	configuredMCPCircuits.Lock()
+	defer configuredMCPCircuits.Unlock()
+	entry := configuredMCPCircuits.entries[key]
+	entry.failures++
+	if entry.failures < configuredMCPCircuitThreshold {
+		configuredMCPCircuits.entries[key] = entry
+		return
+	}
+	exponent := entry.failures - configuredMCPCircuitThreshold
+	delay := configuredMCPCircuitBaseBackoff
+	for index := 0; index < exponent && delay < configuredMCPCircuitMaximumDelay; index++ {
+		delay *= 2
+	}
+	if delay > configuredMCPCircuitMaximumDelay {
+		delay = configuredMCPCircuitMaximumDelay
+	}
+	entry.openUntil = now.Add(delay)
+	configuredMCPCircuits.entries[key] = entry
+}
+
+func recordConfiguredMCPSuccess(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	configuredMCPCircuits.Lock()
+	delete(configuredMCPCircuits.entries, key)
+	configuredMCPCircuits.Unlock()
 }
 
 func normalizeMCPServerName(name string) string {

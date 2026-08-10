@@ -1,7 +1,7 @@
 package knowledge
 
 import (
-	"SREagent/internal/observability"
+	"github.com/Thadopz/telltale/internal/observability"
 	"bytes"
 	"context"
 	"encoding/json"

@@ -1,9 +1,9 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/ai/tools"
 	"context"
 	"errors"
+	"github.com/Thadopz/telltale/internal/ai/tools"
 	"io"
 	"strings"
 	"testing"

@@ -1,8 +1,10 @@
 package trace
 
 import (
-	"SREagent/internal/ai/evidence"
-	"SREagent/internal/observability"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/observability"
+	"github.com/Thadopz/telltale/utility/mem"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,20 +23,42 @@ import (
 type componentSpanKey struct{}
 
 type AgentStep struct {
-	Index            int       `json:"index"`
-	Agent            string    `json:"agent"`
-	Phase            string    `json:"phase"`
-	Component        string    `json:"component,omitempty"`
-	Type             string    `json:"type,omitempty"`
-	Name             string    `json:"name,omitempty"`
-	Input            string    `json:"input,omitempty"`
-	Output           string    `json:"output,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	ElapsedMS        int64     `json:"elapsed_ms,omitempty"`
-	PromptTokens     int       `json:"prompt_tokens,omitempty"`
-	CompletionTokens int       `json:"completion_tokens,omitempty"`
-	TotalTokens      int       `json:"total_tokens,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
+	Index                 int       `json:"index"`
+	Agent                 string    `json:"agent"`
+	Phase                 string    `json:"phase"`
+	Component             string    `json:"component,omitempty"`
+	Type                  string    `json:"type,omitempty"`
+	Name                  string    `json:"name,omitempty"`
+	Input                 string    `json:"input,omitempty"`
+	Output                string    `json:"output,omitempty"`
+	Error                 string    `json:"error,omitempty"`
+	ElapsedMS             int64     `json:"elapsed_ms,omitempty"`
+	PromptTokens          int       `json:"prompt_tokens,omitempty"`
+	EstimatedPromptTokens int       `json:"estimated_prompt_tokens,omitempty"`
+	CompletionTokens      int       `json:"completion_tokens,omitempty"`
+	TotalTokens           int       `json:"total_tokens,omitempty"`
+	InputBudgetTokens     int       `json:"input_budget_tokens,omitempty"`
+	FinalBudgetTokens     int       `json:"final_budget_tokens,omitempty"`
+	ContextWindowTokens   int       `json:"context_window_tokens,omitempty"`
+	PromptOverheadTokens  int       `json:"prompt_overhead_tokens,omitempty"`
+	SafetyMarginTokens    int       `json:"safety_margin_tokens,omitempty"`
+	CalibrationFactor     float64   `json:"calibration_factor,omitempty"`
+	TrimmedLayers         []string  `json:"trimmed_layers,omitempty"`
+	ClaimSchemaVersion    int       `json:"claim_schema_version,omitempty"`
+	ClaimCount            int       `json:"claim_count,omitempty"`
+	ClaimExtractorSuccess bool      `json:"claim_extractor_success,omitempty"`
+	ClaimExtractorError   string    `json:"claim_extractor_error,omitempty"`
+	CoverageStatuses      []string  `json:"coverage_statuses,omitempty"`
+	CoveredClaimCount     int       `json:"covered_claim_count,omitempty"`
+	SupportedClaimCount   int       `json:"supported_claim_count,omitempty"`
+	RefutedClaimCount     int       `json:"refuted_claim_count,omitempty"`
+	PartialClaimCount     int       `json:"partial_claim_count,omitempty"`
+	UnknownClaimCount     int       `json:"unknown_claim_count,omitempty"`
+	UncoveredClaimCount   int       `json:"uncovered_claim_count,omitempty"`
+	ConflictClaimCount    int       `json:"conflict_claim_count,omitempty"`
+	EvidenceConflictCount int       `json:"evidence_conflict_count,omitempty"`
+	LocalizationMode      string    `json:"localization_mode,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type ToolEvidence struct {
@@ -57,14 +81,23 @@ func (s AgentStep) String() string {
 }
 
 type Recorder struct {
-	mu           sync.Mutex
-	steps        []AgentStep
-	toolInputs   map[string][]string
-	toolEvidence []ToolEvidence
+	mu             sync.Mutex
+	steps          []AgentStep
+	toolInputs     map[string][]string
+	toolEvidence   []ToolEvidence
+	modelEstimates map[string][]modelEstimate
+}
+
+type modelEstimate struct {
+	modelKey  string
+	estimated int
 }
 
 func NewRecorder() *Recorder {
-	return &Recorder{toolInputs: make(map[string][]string)}
+	return &Recorder{
+		toolInputs:     make(map[string][]string),
+		modelEstimates: make(map[string][]modelEstimate),
+	}
 }
 
 func (r *Recorder) Record(step AgentStep) AgentStep {
@@ -157,6 +190,33 @@ func (r *Recorder) PopToolInput(name string) string {
 	return value
 }
 
+func (r *Recorder) PushModelEstimate(component string, estimate modelEstimate) {
+	if r == nil || estimate.estimated <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.modelEstimates == nil {
+		r.modelEstimates = make(map[string][]modelEstimate)
+	}
+	r.modelEstimates[component] = append(r.modelEstimates[component], estimate)
+}
+
+func (r *Recorder) PopModelEstimate(component string) modelEstimate {
+	if r == nil {
+		return modelEstimate{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	values := r.modelEstimates[component]
+	if len(values) == 0 {
+		return modelEstimate{}
+	}
+	value := values[0]
+	r.modelEstimates[component] = values[1:]
+	return value
+}
+
 func (r *Recorder) RecordToolEvidence(item ToolEvidence) {
 	if r == nil {
 		return
@@ -186,21 +246,27 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	builder.OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
 		ctx = startComponentSpan(ctx, info)
 		recordToolInput(info, input, recorder)
-		recorder.Record(AgentStep{
+		step := AgentStep{
 			Agent:     agent,
 			Phase:     "start",
 			Component: string(info.Component),
 			Type:      info.Type,
 			Name:      info.Name,
 			Input:     compactJSON(input),
-		})
+		}
+		if info != nil && info.Component == components.ComponentOfChatModel {
+			modelKey, estimated := modelCallbackEstimate(ctx, info, input)
+			recorder.PushModelEstimate(info.Name, modelEstimate{modelKey: modelKey, estimated: estimated})
+			applyBudgetReport(ctx, &step, estimated, modelKey)
+		}
+		recorder.Record(step)
 		return ctx
 	})
 
 	builder.OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
 		recordToolOutput(info, output, recorder)
 		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
-		recorder.Record(AgentStep{
+		step := AgentStep{
 			Agent:            agent,
 			Phase:            "end",
 			Component:        string(info.Component),
@@ -210,7 +276,16 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      totalTokens,
-		})
+		}
+		if info != nil && info.Component == components.ComponentOfChatModel {
+			estimate := recorder.PopModelEstimate(info.Name)
+			step.EstimatedPromptTokens = estimate.estimated
+			if promptTokens > 0 && estimate.estimated > 0 {
+				contextbudget.DefaultCalibrator().Observe(ctx, estimate.modelKey, estimate.estimated, promptTokens)
+			}
+			step.CalibrationFactor = contextbudget.DefaultCalibrator().Factor(ctx, estimate.modelKey)
+		}
+		recorder.Record(step)
 		endComponentSpan(ctx, nil)
 		return ctx
 	})
@@ -218,6 +293,11 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	builder.OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		if info == nil {
 			return ctx
+		}
+		if info.Component == components.ComponentOfChatModel {
+			// Do not let a failed attempt's estimate be paired with a later
+			// retry's successful PromptTokens. Failed calls never calibrate.
+			recorder.PopModelEstimate(info.Name)
 		}
 		errText := ""
 		if err != nil {
@@ -248,14 +328,20 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		}
 		ctx = startComponentSpan(ctx, info)
 		recordToolInput(info, input, recorder)
-		step := recorder.Record(AgentStep{
+		step := AgentStep{
 			Agent:     agent,
 			Phase:     "start",
 			Component: string(info.Component),
 			Type:      info.Type,
 			Name:      info.Name,
 			Input:     compactJSON(input),
-		})
+		}
+		if info.Component == components.ComponentOfChatModel {
+			modelKey, estimated := modelCallbackEstimate(ctx, info, input)
+			recorder.PushModelEstimate(info.Name, modelEstimate{modelKey: modelKey, estimated: estimated})
+			applyBudgetReport(ctx, &step, estimated, modelKey)
+		}
+		step = recorder.Record(step)
 		emitTraceStep(info, step, emit)
 		return ctx
 	})
@@ -266,7 +352,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 		}
 		recordToolOutput(info, output, recorder)
 		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
-		step := recorder.Record(AgentStep{
+		step := AgentStep{
 			Agent:            agent,
 			Phase:            "end",
 			Component:        string(info.Component),
@@ -276,7 +362,16 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
 			TotalTokens:      totalTokens,
-		})
+		}
+		if info.Component == components.ComponentOfChatModel {
+			estimate := recorder.PopModelEstimate(info.Name)
+			step.EstimatedPromptTokens = estimate.estimated
+			if promptTokens > 0 && estimate.estimated > 0 {
+				contextbudget.DefaultCalibrator().Observe(ctx, estimate.modelKey, estimate.estimated, promptTokens)
+			}
+			step.CalibrationFactor = contextbudget.DefaultCalibrator().Factor(ctx, estimate.modelKey)
+		}
+		step = recorder.Record(step)
 		emitTraceStep(info, step, emit)
 		endComponentSpan(ctx, nil)
 		return ctx
@@ -285,6 +380,9 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 	builder.OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		if info == nil {
 			return ctx
+		}
+		if info.Component == components.ComponentOfChatModel {
+			recorder.PopModelEstimate(info.Name)
 		}
 		errText := ""
 		if err != nil {
@@ -316,6 +414,50 @@ func modelTokenUsage(info *callbacks.RunInfo, output callbacks.CallbackOutput) (
 		return 0, 0, 0
 	}
 	return modelOutput.TokenUsage.PromptTokens, modelOutput.TokenUsage.CompletionTokens, modelOutput.TokenUsage.TotalTokens
+}
+
+func modelCallbackEstimate(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) (string, int) {
+	modelInput := model.ConvCallbackInput(input)
+	modelKey := "chat_model"
+	if info != nil && strings.TrimSpace(info.Name) != "" {
+		modelKey = strings.TrimSpace(info.Name)
+	}
+	if modelInput == nil {
+		return contextbudget.CalibrationKeyForModel(ctx, modelKey), 0
+	}
+	if modelInput.Config != nil && strings.TrimSpace(modelInput.Config.Model) != "" {
+		modelKey = strings.TrimSpace(modelInput.Config.Model)
+	}
+	total := 32
+	for _, message := range modelInput.Messages {
+		total += mem.EstimateMessageTokens(message)
+	}
+	for _, toolInfo := range modelInput.Tools {
+		if toolInfo == nil {
+			continue
+		}
+		encoded, err := json.Marshal(toolInfo)
+		if err == nil {
+			total += contextbudget.EstimateTextTokens(string(encoded)) + 4
+		}
+	}
+	return contextbudget.CalibrationKeyForModel(ctx, modelKey), total
+}
+
+func applyBudgetReport(ctx context.Context, step *AgentStep, estimated int, modelKey string) {
+	if step == nil {
+		return
+	}
+	step.EstimatedPromptTokens = estimated
+	step.CalibrationFactor = contextbudget.DefaultCalibrator().Factor(ctx, modelKey)
+	if report, ok := contextbudget.BudgetReportFromContext(ctx); ok {
+		step.InputBudgetTokens = report.InputLimitTokens
+		step.FinalBudgetTokens = report.FinalBudgetTokens
+		step.ContextWindowTokens = report.ContextWindowTokens
+		step.PromptOverheadTokens = report.PromptOverheadTokens
+		step.SafetyMarginTokens = report.SafetyMarginTokens
+		step.TrimmedLayers = append([]string(nil), report.TrimmedLayers...)
+	}
 }
 
 func startComponentSpan(ctx context.Context, info *callbacks.RunInfo) context.Context {

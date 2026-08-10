@@ -27,7 +27,7 @@ func Init(ctx context.Context) (Shutdown, error) {
 	}
 
 	endpoint := configString(ctx, "observability.otlp_endpoint", "localhost:4317")
-	serviceName := configString(ctx, "observability.service_name", "sreagent")
+	serviceName := configString(ctx, "observability.service_name", "telltale")
 	insecure := configBool(ctx, "observability.insecure", true)
 
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(

@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"SREagent/internal/ai/evidence"
 	"context"
 	"errors"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"testing"
 	"time"
 
@@ -116,33 +116,55 @@ func TestLoadToolsWithTimeoutStopsWaitingForBlockedLoader(t *testing.T) {
 	}
 }
 
-func TestLoadSREGymEndpointsKeepsSuccessfulTools(t *testing.T) {
-	endpoints := []sregymEndpoint{
-		{Name: "failed", URL: "http://failed"},
-		{Name: "working", URL: "http://working"},
+func TestWriteTimeoutReturnsUnknownOperationState(t *testing.T) {
+	output := timeoutOutputForPolicy("mysql_crud", 10*time.Millisecond, ExecutionPolicy{
+		ReadOnly:       false,
+		Cancellable:    false,
+		Idempotent:     false,
+		OperationAware: true,
+	}, "op-timeout-1")
+	env := evidence.Parse(output).Envelope
+	if env.Status != evidence.StatusUnknown || env.OperationID != "op-timeout-1" {
+		t.Fatalf("expected unknown write operation state, got %#v", env)
 	}
-	workingTool := &testInvokableTool{
-		name: "working_tool",
+	if env.ErrorCode != "OPERATION_STATE_UNKNOWN" {
+		t.Fatalf("expected operation-state error code, got %#v", env)
+	}
+}
+
+func TestWriteTimeoutDoesNotWaitForBackgroundOperation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	inner := &testInvokableTool{
+		name: "slow_write",
 		run: func(context.Context) (string, error) {
-			return "ok", nil
+			close(started)
+			<-release
+			return evidence.Marshal(evidence.NewDataWithObservations(
+				map[string]any{"rows_affected": 1},
+				"write completed",
+				[]evidence.Observation{{Kind: evidence.ObservationOrderState}},
+			)), nil
 		},
 	}
 
-	tools, err := loadSREGymEndpoints(context.Background(), endpoints, func(_ context.Context, endpoint sregymEndpoint) ([]tool.BaseTool, error) {
-		if endpoint.Name == "failed" {
-			return nil, errors.New("endpoint unavailable")
-		}
-		return []tool.BaseTool{workingTool}, nil
-	})
-
-	if err == nil {
-		t.Fatal("expected partial registration error")
+	output, err := invokeToolWithPolicyTimeout(context.Background(), inner, inner.name, `{ "operation_id": "op-timeout-2" }`, 10*time.Millisecond, ExecutionPolicy{
+		ReadOnly:       false,
+		Cancellable:    false,
+		Idempotent:     false,
+		OperationAware: true,
+	}, "op-timeout-2")
+	if err != nil {
+		t.Fatalf("expected unknown operation envelope, got error %v", err)
 	}
-	if len(tools) != 1 {
-		t.Fatalf("expected one successfully registered tool, got %d", len(tools))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("write tool was not started")
 	}
-	info, infoErr := tools[0].Info(context.Background())
-	if infoErr != nil || info.Name != "working_tool" {
-		t.Fatalf("unexpected registered tool: info=%#v err=%v", info, infoErr)
+	env := evidence.Parse(output).Envelope
+	if env.Status != evidence.StatusUnknown || env.OperationID != "op-timeout-2" {
+		t.Fatalf("expected unknown operation state, got %#v", env)
 	}
+	close(release)
 }

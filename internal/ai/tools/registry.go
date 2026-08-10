@@ -1,9 +1,10 @@
 package tools
 
 import (
-	"SREagent/internal/authz"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/codeintel"
+	"github.com/Thadopz/telltale/internal/authz"
 	"sync"
 	"time"
 
@@ -16,8 +17,7 @@ type Scenario string
 type Domain string
 
 const (
-	ScenarioChat  Scenario = "chat"
-	ScenarioAIOps Scenario = "aiops"
+	ScenarioChat Scenario = "chat"
 
 	DomainGeneral       Domain = "general"
 	DomainObservability Domain = "observability"
@@ -34,18 +34,27 @@ type DomainToolSet struct {
 	Tools  []tool.BaseTool
 }
 
-type Registry struct{}
+type Registry struct {
+	codeService     *codeintel.Service
+	codeServiceErr  error
+	codeServiceOnce sync.Once
+	chatSets        []DomainToolSet
+	chatSetsErr     error
+	chatSetsOnce    sync.Once
+}
 
 func NewRegistry() *Registry {
 	return &Registry{}
+}
+
+func NewRegistryWithCodeService(service *codeintel.Service) *Registry {
+	return &Registry{codeService: service}
 }
 
 func (r *Registry) ToolsFor(ctx context.Context, scenario Scenario) ([]tool.BaseTool, error) {
 	switch scenario {
 	case ScenarioChat:
 		return r.chatTools(ctx)
-	case ScenarioAIOps:
-		return r.aiOpsTools(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported tool scenario: %s", scenario)
 	}
@@ -59,7 +68,22 @@ func (r *Registry) chatTools(ctx context.Context) ([]tool.BaseTool, error) {
 
 	var toolList []tool.BaseTool
 	for _, set := range sets {
-		toolList = append(toolList, set.Tools...)
+		for _, candidate := range set.Tools {
+			info, infoErr := candidate.Info(ctx)
+			if infoErr != nil {
+				return nil, infoErr
+			}
+			metadata, known := LookupMetadata(info.Name)
+			if known && !metadata.AgentVisible {
+				continue
+			}
+			// Keep the legacy API from exposing capability-bound code tools.
+			// Domain agents use ToolsForAgent, which applies the full scope check.
+			if known && metadata.RequiredCapability != "" {
+				continue
+			}
+			toolList = append(toolList, candidate)
+		}
 	}
 	return toolList, nil
 }
@@ -68,23 +92,22 @@ func (r *Registry) chatTools(ctx context.Context) ([]tool.BaseTool, error) {
 // deterministic order. Empty groups are retained so configuration and tests
 // can reason about the complete domain model.
 func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error) {
+	r.chatSetsOnce.Do(func() {
+		r.chatSets, r.chatSetsErr = r.buildChatDomainTools(ctx)
+	})
+	return r.chatSets, r.chatSetsErr
+}
+
+func (r *Registry) buildChatDomainTools(ctx context.Context) ([]DomainToolSet, error) {
 	configuredTools, err := configuredMCPDomainTools(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	observabilityTools, err := r.optionalLogMcpTools(ctx)
-	if err != nil {
-		return nil, err
-	}
+	var observabilityTools []tool.BaseTool
 	if err = appendSREGymLocalTools(ctx, &observabilityTools); err != nil {
 		return nil, err
 	}
-	sregymTools, err := r.optionalSREGymMCPTools(ctx)
-	if err != nil {
-		return nil, err
-	}
-	observabilityTools = appendUniqueTools(ctx, observabilityTools, sregymTools)
 	if err = appendTool(ctx, &observabilityTools, NewPrometheusAlertsQueryTool); err != nil {
 		return nil, err
 	}
@@ -94,13 +117,25 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 	if err = appendTool(ctx, &databaseTools, NewMysqlCrudTool); err != nil {
 		return nil, err
 	}
-	if err = appendTool(ctx, &databaseTools, NewMysqlSlowSQLTool); err != nil {
-		return nil, err
+	databaseRegistrationCtx := authz.WithAgentScope(ctx, authz.AgentScopeDatabase)
+	for _, factory := range []func() (tool.InvokableTool, error){
+		NewDBServerHealthTool,
+		NewDBActiveQueriesTool,
+		NewDBWaitEventsTool,
+		NewDBLocksTool,
+		NewDBSlowQueriesTool,
+	} {
+		if err = appendTool(databaseRegistrationCtx, &databaseTools, factory); err != nil {
+			return nil, err
+		}
 	}
 	databaseTools = appendUniqueTools(ctx, databaseTools, configuredTools[DomainDatabase])
 
 	var paymentTools []tool.BaseTool
 	if err = appendPaymentAgentTools(ctx, &paymentTools); err != nil {
+		return nil, err
+	}
+	if err = r.appendCodeTools(ctx, &paymentTools); err != nil {
 		return nil, err
 	}
 	paymentTools = appendUniqueTools(ctx, paymentTools, configuredTools[DomainPayment])
@@ -125,43 +160,126 @@ func (r *Registry) ChatDomainTools(ctx context.Context) ([]DomainToolSet, error)
 	}, nil
 }
 
-func (r *Registry) aiOpsTools(ctx context.Context) ([]tool.BaseTool, error) {
-	configuredTools, err := configuredMCPDomainTools(ctx)
-	if err != nil {
-		return nil, err
+func (r *Registry) ToolsForAgent(ctx context.Context, scenario Scenario, agentScope authz.AgentScope) ([]tool.BaseTool, error) {
+	if scenario != ScenarioChat {
+		return nil, fmt.Errorf("unsupported agent scope %q for scenario %q", agentScope, scenario)
 	}
 
-	toolList, err := r.optionalLogMcpTools(ctx)
+	sets, err := r.ChatDomainTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err = appendSREGymLocalTools(ctx, &toolList); err != nil {
-		return nil, err
+	targetDomain, ok := domainForAgentScope(agentScope)
+	if !ok {
+		return nil, fmt.Errorf("unsupported chat agent scope %q", agentScope)
 	}
-	sregymTools, err := r.optionalSREGymMCPTools(ctx)
+	for _, set := range sets {
+		if set.Domain == targetDomain {
+			return filterToolsForAgent(ctx, set.Tools, agentScope), nil
+		}
+	}
+	return nil, nil
+}
+
+// FilterToolsForAgent applies the same visibility and scope rules to a caller
+// supplied tool list. This keeps custom eval or embedding integrations from
+// bypassing the production tool boundary used by Registry.ToolsForAgent.
+func FilterToolsForAgent(ctx context.Context, candidates []tool.BaseTool, agentScope authz.AgentScope) []tool.BaseTool {
+	return filterToolsForAgent(ctx, candidates, agentScope)
+}
+
+func filterToolsForAgent(ctx context.Context, candidates []tool.BaseTool, agentScope authz.AgentScope) []tool.BaseTool {
+	filtered := make([]tool.BaseTool, 0, len(candidates))
+	for _, candidate := range candidates {
+		info, err := candidate.Info(ctx)
+		if err != nil || info == nil {
+			continue
+		}
+		metadata, known := LookupMetadata(info.Name)
+		if known && !metadata.AgentVisible {
+			continue
+		}
+		if known && len(metadata.AllowedAgentScopes) > 0 && !containsAgentScope(metadata.AllowedAgentScopes, agentScope) {
+			continue
+		}
+		if agentScope == authz.AgentScopeDatabase && !databaseAgentToolName(info.Name) {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered
+}
+
+func containsAgentScope(scopes []authz.AgentScope, wanted authz.AgentScope) bool {
+	for _, scope := range scopes {
+		if scope == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func databaseAgentToolName(name string) bool {
+	switch name {
+	case "db_server_health", "db_active_queries", "db_wait_events", "db_locks", "db_slow_queries":
+		return true
+	default:
+		return false
+	}
+}
+
+func domainForAgentScope(scope authz.AgentScope) (Domain, bool) {
+	switch scope {
+	case authz.AgentScopeCoordinator:
+		return DomainGeneral, true
+	case authz.AgentScopeObservability:
+		return DomainObservability, true
+	case authz.AgentScopeDatabase:
+		return DomainDatabase, true
+	case authz.AgentScopePayment:
+		return DomainPayment, true
+	case authz.AgentScopeKnowledge:
+		return DomainKnowledge, true
+	default:
+		return "", false
+	}
+}
+
+func (r *Registry) appendCodeTools(ctx context.Context, toolList *[]tool.BaseTool) error {
+	if !codeintel.Enabled(ctx) && r.codeService == nil {
+		return nil
+	}
+	service, err := r.codeServiceFor(ctx)
 	if err != nil {
-		return nil, err
+		g.Log().Warningf(ctx, "code search source unavailable; hiding code tools: %v", err)
+		return nil
 	}
-	toolList = appendUniqueTools(ctx, toolList, sregymTools)
-	if err = appendTool(ctx, &toolList, NewPrometheusAlertsQueryTool); err != nil {
-		return nil, err
+	if service == nil {
+		return nil
 	}
-	if err = appendTool(ctx, &toolList, NewMysqlSlowSQLTool); err != nil {
-		return nil, err
+
+	registrationCtx := authz.WithAgentScope(ctx, authz.AgentScopePayment)
+	registrationCtx = authz.WithAgentCapability(registrationCtx, authz.NewAgentCapabilityWithCapabilities(authz.AgentScopePayment, 10*time.Minute, "payment.diagnose", "code.read"))
+	factories := []func() (tool.InvokableTool, error){
+		func() (tool.InvokableTool, error) { return NewCodeSearchTool(service) },
+		func() (tool.InvokableTool, error) { return NewCodeReadTool(service) },
 	}
-	if err = appendPaymentAgentTools(ctx, &toolList); err != nil {
-		return nil, err
+	for _, factory := range factories {
+		if err := appendTool(registrationCtx, toolList, factory); err != nil {
+			return err
+		}
 	}
-	if err = appendTool(ctx, &toolList, NewQueryInternalDocsTool); err != nil {
-		return nil, err
+	return nil
+}
+
+func (r *Registry) codeServiceFor(ctx context.Context) (*codeintel.Service, error) {
+	if r.codeService != nil {
+		return r.codeService, nil
 	}
-	if err = appendTool(ctx, &toolList, NewGetCurrentTimeTool); err != nil {
-		return nil, err
-	}
-	for _, domain := range []Domain{DomainObservability, DomainDatabase, DomainPayment, DomainKnowledge} {
-		toolList = appendUniqueTools(ctx, toolList, configuredTools[domain])
-	}
-	return toolList, nil
+	r.codeServiceOnce.Do(func() {
+		r.codeService, r.codeServiceErr = codeintel.LoadFromConfig(ctx)
+	})
+	return r.codeService, r.codeServiceErr
 }
 
 func appendTool(ctx context.Context, toolList *[]tool.BaseTool, factory func() (tool.InvokableTool, error)) error {
@@ -245,76 +363,6 @@ func toolName(ctx context.Context, candidate tool.BaseTool) string {
 		return ""
 	}
 	return info.Name
-}
-
-func (r *Registry) optionalLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
-	if !configBool(ctx, "tools.mcp_log.enabled", true) {
-		g.Log().Info(ctx, "mcp log tools disabled by config")
-		return []tool.BaseTool{}, nil
-	}
-	if !toolAllowedForRegistration(ctx, "mcp_log", authz.PermLogsRead) {
-		g.Log().Info(ctx, "mcp log tools hidden by permission policy")
-		return []tool.BaseTool{}, nil
-	}
-
-	toolList, err := cachedLogMcpTools(ctx)
-	if err == nil {
-		return wrapMCPLogTools(toolList), nil
-	}
-	if configBool(ctx, "tools.mcp_log.required", false) {
-		return nil, err
-	}
-	g.Log().Warningf(ctx, "mcp log tools unavailable, continue without mcp log tools, err=%v", err)
-	return []tool.BaseTool{}, nil
-}
-
-var mcpLogCache = struct {
-	sync.Mutex
-	url     string
-	tools   []tool.BaseTool
-	err     error
-	expires time.Time
-}{}
-
-func cachedLogMcpTools(ctx context.Context) ([]tool.BaseTool, error) {
-	url := getMCPLogURL(ctx)
-	now := time.Now()
-
-	mcpLogCache.Lock()
-	if mcpLogCache.url == url && now.Before(mcpLogCache.expires) {
-		tools := append([]tool.BaseTool(nil), mcpLogCache.tools...)
-		err := mcpLogCache.err
-		mcpLogCache.Unlock()
-		return tools, err
-	}
-	mcpLogCache.Unlock()
-
-	tools, err := GetLogMcpTool(ctx)
-	ttl := time.Minute
-	if err != nil {
-		ttl = 30 * time.Second
-	}
-
-	mcpLogCache.Lock()
-	mcpLogCache.url = url
-	mcpLogCache.tools = append([]tool.BaseTool(nil), tools...)
-	mcpLogCache.err = err
-	mcpLogCache.expires = now.Add(ttl)
-	mcpLogCache.Unlock()
-
-	return append([]tool.BaseTool(nil), tools...), err
-}
-
-func wrapMCPLogTools(toolList []tool.BaseTool) []tool.BaseTool {
-	wrapped := make([]tool.BaseTool, 0, len(toolList))
-	for _, candidate := range toolList {
-		invokable, ok := candidate.(tool.InvokableTool)
-		if !ok {
-			continue
-		}
-		wrapped = append(wrapped, wrapAuthorizedToolWithPermission(invokable, authz.PermLogsRead))
-	}
-	return wrapped
 }
 
 func configBool(ctx context.Context, key string, fallback bool) bool {

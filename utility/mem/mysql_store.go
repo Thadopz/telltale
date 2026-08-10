@@ -2,27 +2,37 @@ package mem
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
-	_ "github.com/gogf/gf/contrib/drivers/mysql/v2"
 	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/frame/g"
 )
 
-type mysqlMemoryStore struct{}
+type sqliteMemoryStore struct{}
 
 type mysqlTurn struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-func newMySQLMemoryStore() *mysqlMemoryStore {
-	return &mysqlMemoryStore{}
+type contextSnapshotRow struct {
+	Summary           string    `json:"summary"`
+	FactsJSON         string    `json:"facts_json"`
+	Generation        int       `json:"generation"`
+	BeforeTokens      int       `json:"before_tokens"`
+	AfterTokens       int       `json:"after_tokens"`
+	CompactedMessages int       `json:"compacted_messages"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
-func (s *mysqlMemoryStore) Load(id string) (*memorySnapshot, error) {
+func newSQLiteMemoryStore() *sqliteMemoryStore {
+	return &sqliteMemoryStore{}
+}
+
+func (s *sqliteMemoryStore) Load(id string) (*memorySnapshot, error) {
 	ctx := context.Background()
 
 	var turns []mysqlTurn
@@ -44,7 +54,19 @@ func (s *mysqlMemoryStore) Load(id string) (*memorySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(turns) == 0 && summaryRecord.IsEmpty() {
+
+	var compactionRows []contextSnapshotRow
+	err = g.DB().Model("context_snapshots").
+		Ctx(ctx).
+		Fields("summary", "facts_json", "generation", "before_tokens", "after_tokens", "compacted_messages", "created_at").
+		Where("conversation_id", id).
+		OrderDesc("id").
+		Limit(1).
+		Scan(&compactionRows)
+	if err != nil && !isMissingContextSnapshotsTable(err) {
+		return nil, err
+	}
+	if len(turns) == 0 && summaryRecord.IsEmpty() && len(compactionRows) == 0 {
 		return nil, nil
 	}
 
@@ -67,10 +89,28 @@ func (s *mysqlMemoryStore) Load(id string) (*memorySnapshot, error) {
 			snapshot.UpdatedAt = updatedAt
 		}
 	}
+	if len(compactionRows) > 0 {
+		row := compactionRows[0]
+		if strings.TrimSpace(row.Summary) != "" && strings.TrimSpace(snapshot.Summary) == "" {
+			snapshot.Summary = row.Summary
+		}
+		if strings.TrimSpace(row.FactsJSON) != "" {
+			if err := json.Unmarshal([]byte(row.FactsJSON), &snapshot.Facts); err != nil {
+				return nil, err
+			}
+		}
+		snapshot.Compaction = CompactionMetadata{
+			Generation:        row.Generation,
+			BeforeTokens:      row.BeforeTokens,
+			AfterTokens:       row.AfterTokens,
+			CompactedMessages: row.CompactedMessages,
+			CreatedAt:         row.CreatedAt,
+		}
+	}
 	return snapshot, nil
 }
 
-func (s *mysqlMemoryStore) Save(snapshot *memorySnapshot) error {
+func (s *sqliteMemoryStore) Save(snapshot *memorySnapshot) error {
 	if snapshot == nil || strings.TrimSpace(snapshot.ID) == "" {
 		return nil
 	}
@@ -111,14 +151,22 @@ func (s *mysqlMemoryStore) Save(snapshot *memorySnapshot) error {
 				Ctx(ctx).
 				Where("conversation_id", snapshot.ID).
 				Delete()
+			if err != nil {
+				return err
+			}
+		} else if err := upsertSummary(ctx, tx, snapshot); err != nil {
 			return err
 		}
-
-		return upsertSummary(ctx, tx, snapshot)
+		if snapshot.Compaction.Pending || len(snapshot.Facts) > 0 {
+			if err := saveContextSnapshot(ctx, tx, snapshot); err != nil && !isMissingContextSnapshotsTable(err) {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-func (s *mysqlMemoryStore) Append(snapshot *memorySnapshot, msg *schema.Message) error {
+func (s *sqliteMemoryStore) Append(snapshot *memorySnapshot, msg *schema.Message) error {
 	if snapshot == nil || msg == nil || strings.TrimSpace(snapshot.ID) == "" {
 		return nil
 	}
@@ -138,8 +186,48 @@ func (s *mysqlMemoryStore) Append(snapshot *memorySnapshot, msg *schema.Message)
 			Insert(); err != nil {
 			return err
 		}
-		return upsertSummary(ctx, tx, snapshot)
+		if err := upsertSummary(ctx, tx, snapshot); err != nil {
+			return err
+		}
+		if snapshot.Compaction.Pending || len(snapshot.Facts) > 0 {
+			if err := saveContextSnapshot(ctx, tx, snapshot); err != nil && !isMissingContextSnapshotsTable(err) {
+				return err
+			}
+		}
+		return nil
 	})
+}
+
+// SaveContextFacts persists machine-readable context metadata without
+// rewriting conversation_turns. The conversation table is an archive, so a
+// fact update must not erase earlier turns just because it has no new message.
+func (s *sqliteMemoryStore) SaveContextFacts(snapshot *memorySnapshot) error {
+	if snapshot == nil || strings.TrimSpace(snapshot.ID) == "" {
+		return nil
+	}
+	return g.DB().Transaction(context.Background(), func(ctx context.Context, tx gdb.TX) error {
+		if err := ensureConversation(ctx, tx, snapshot); err != nil {
+			return err
+		}
+		if strings.TrimSpace(snapshot.Summary) != "" {
+			if err := upsertSummary(ctx, tx, snapshot); err != nil {
+				return err
+			}
+		}
+		if err := saveContextSnapshot(ctx, tx, snapshot); err != nil && !isMissingContextSnapshotsTable(err) {
+			return err
+		}
+		return nil
+	})
+}
+
+// mysqlMemoryStore and newMySQLMemoryStore remain as source-compatible test
+// aliases for callers migrating from the server edition. The implementation
+// now uses the configured local SQLite database.
+type mysqlMemoryStore = sqliteMemoryStore
+
+func newMySQLMemoryStore() *sqliteMemoryStore {
+	return newSQLiteMemoryStore()
 }
 
 func ensureConversation(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) error {
@@ -163,7 +251,8 @@ func ensureConversation(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot
 }
 
 func upsertSummary(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) error {
-	if strings.TrimSpace(snapshot.Summary) == "" {
+	summary := trimSessionStateText(redactText(snapshot.Summary), defaultContextSummaryMaxChars)
+	if strings.TrimSpace(summary) == "" {
 		return nil
 	}
 
@@ -171,7 +260,7 @@ func upsertSummary(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) err
 		Ctx(ctx).
 		Data(g.Map{
 			"conversation_id": snapshot.ID,
-			"summary":         snapshot.Summary,
+			"summary":         summary,
 			"updated_at":      snapshot.UpdatedAt,
 		}).
 		InsertIgnore(); err != nil {
@@ -182,9 +271,59 @@ func upsertSummary(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) err
 		Ctx(ctx).
 		Where("conversation_id", snapshot.ID).
 		Data(g.Map{
-			"summary":    snapshot.Summary,
+			"summary":    summary,
 			"updated_at": snapshot.UpdatedAt,
 		}).
 		Update()
 	return err
+}
+
+func saveContextSnapshot(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) error {
+	safeFacts := sanitizeContextFacts(snapshot.Facts)
+	factsJSON, err := json.Marshal(safeFacts)
+	if err != nil {
+		return err
+	}
+	createdAt := snapshot.Compaction.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	_, err = tx.Model("context_snapshots").Ctx(ctx).Data(g.Map{
+		"conversation_id":    snapshot.ID,
+		"summary":            trimSessionStateText(redactText(snapshot.Summary), defaultContextSummaryMaxChars),
+		"facts_json":         string(factsJSON),
+		"generation":         snapshot.Compaction.Generation,
+		"before_tokens":      snapshot.Compaction.BeforeTokens,
+		"after_tokens":       snapshot.Compaction.AfterTokens,
+		"compacted_messages": snapshot.Compaction.CompactedMessages,
+		"created_at":         createdAt,
+	}).Insert()
+	return err
+}
+
+func sanitizeContextFacts(facts []ContextFact) []ContextFact {
+	if len(facts) == 0 {
+		return nil
+	}
+	safe := make([]ContextFact, 0, len(facts))
+	for _, fact := range facts {
+		switch strings.ToLower(strings.TrimSpace(fact.Kind)) {
+		case "claim_id", "claim_type", "assertion_kind", "coverage_status", "hypothesis_id", "hypothesis_status", "evidence_id", "failed_query_id":
+			// These are bounded machine identifiers and state enums. They must
+			// remain exact so a later diagnostic run can resolve them.
+		default:
+			fact.Value = redactText(fact.Value)
+		}
+		safe = append(safe, fact)
+	}
+	return safe
+}
+
+func isMissingContextSnapshotsTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context_snapshots") &&
+		(strings.Contains(message, "no such table") || strings.Contains(message, "doesn't exist"))
 }

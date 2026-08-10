@@ -1,7 +1,7 @@
 package main
 
 import (
-	"SREagent/internal/ai/eval"
+	"github.com/Thadopz/telltale/internal/ai/eval"
 	"testing"
 )
 
@@ -23,6 +23,13 @@ func TestDefaultCasesPathUsesRoutingCasesForRoutingMode(t *testing.T) {
 	path := defaultCasesPath(eval.ModeRouting)
 	if path != "testdata/eval/routing" {
 		t.Fatalf("expected routing cases path, got %q", path)
+	}
+}
+
+func TestDefaultCasesPathUsesContextStressCasesForContextStressMode(t *testing.T) {
+	path := defaultCasesPath(eval.ModeContextStress)
+	if path != "testdata/eval/context_stress" {
+		t.Fatalf("expected context stress cases path, got %q", path)
 	}
 }
 

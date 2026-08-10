@@ -14,28 +14,49 @@ const (
 	StatusSuccess          = "success"
 	StatusError            = "error"
 	StatusTimeout          = "timeout"
+	StatusUnknown          = "unknown"
 	StatusPermissionDenied = "permission_denied"
+	StatusProtocolError    = "protocol_error"
 
 	DataPresent = "present"
 	DataEmpty   = "empty"
 	DataUnknown = "unknown"
+	DataPartial = "partial"
 )
 
 type Envelope struct {
-	Success          bool          `json:"success"`
-	Status           string        `json:"status"`
-	EvidenceID       string        `json:"evidence_id,omitempty"`
-	FailedQueryID    string        `json:"failed_query_id,omitempty"`
-	CanUseAsEvidence bool          `json:"can_use_as_evidence"`
-	DataStatus       string        `json:"data_status"`
-	Data             any           `json:"data,omitempty"`
-	Subject          SubjectRef    `json:"subject,omitempty"`
-	Scope            EvidenceScope `json:"scope,omitempty"`
-	Observations     []Observation `json:"observations,omitempty"`
-	Error            string        `json:"error,omitempty"`
-	ErrorCode        string        `json:"error_code,omitempty"`
-	Message          string        `json:"message,omitempty"`
-	Summary          string        `json:"summary,omitempty"`
+	Success          bool               `json:"success"`
+	Status           string             `json:"status"`
+	EvidenceID       string             `json:"evidence_id,omitempty"`
+	FailedQueryID    string             `json:"failed_query_id,omitempty"`
+	CanUseAsEvidence bool               `json:"can_use_as_evidence"`
+	DataStatus       string             `json:"data_status"`
+	Data             any                `json:"data,omitempty"`
+	SourceKind       EvidenceSourceKind `json:"source_kind,omitempty"`
+	Repository       string             `json:"repository,omitempty"`
+	Revision         string             `json:"revision,omitempty"`
+	SnapshotDigest   string             `json:"snapshot_digest,omitempty"`
+	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
+	RuntimeVerified  bool               `json:"runtime_verified"`
+	ContentTrust     string             `json:"content_trust,omitempty"`
+	Issuer           string             `json:"issuer,omitempty"`
+	RunID            string             `json:"run_id,omitempty"`
+	ConversationID   string             `json:"conversation_id,omitempty"`
+	TenantID         string             `json:"tenant_id,omitempty"`
+	ObservedAt       time.Time          `json:"observed_at,omitempty"`
+	ExpiresAt        *time.Time         `json:"expires_at,omitempty"`
+	ContentDigest    string             `json:"content_digest,omitempty"`
+	TrustLevel       string             `json:"trust_level,omitempty"`
+	OperationID      string             `json:"operation_id,omitempty"`
+	ResultMetadata   ResultMetadata     `json:"result_metadata,omitempty"`
+	Subject          SubjectRef         `json:"subject,omitempty"`
+	Scope            EvidenceScope      `json:"scope,omitempty"`
+	Observations     []Observation      `json:"observations,omitempty"`
+	Error            string             `json:"error,omitempty"`
+	ErrorCode        string             `json:"error_code,omitempty"`
+	FailureReason    string             `json:"failure_reason,omitempty"`
+	Message          string             `json:"message,omitempty"`
+	Summary          string             `json:"summary,omitempty"`
 }
 
 type Parsed struct {
@@ -63,7 +84,17 @@ func NewDataWithObservations(data any, message string, observations []Observatio
 		Message:          message,
 		Summary:          message,
 	}
+	env.SourceKind, env.RuntimeVerified = inferSourceMetadata(env.Observations)
 	env.Subject, env.Scope = firstSubjectScope(env.Observations)
+	return env
+}
+
+func NewDataWithResultMetadata(data any, message string, observations []Observation, metadata ResultMetadata) Envelope {
+	env := NewDataWithObservations(data, message, observations)
+	env.ResultMetadata = metadata
+	if metadata.Truncated {
+		env.DataStatus = DataPartial
+	}
 	return env
 }
 
@@ -93,6 +124,33 @@ func NewError(err error, message string) Envelope {
 		ErrorCode:        code,
 		Message:          message,
 		Summary:          message,
+	}
+}
+
+func NewUnstructuredResult(toolName string) Envelope {
+	return Envelope{
+		Success:       false,
+		Status:        StatusProtocolError,
+		FailedQueryID: newID("fq"),
+		DataStatus:    DataUnknown,
+		ErrorCode:     "UNSTRUCTURED_TOOL_RESULT",
+		FailureReason: "unstructured_tool_result",
+		Message:       "tool " + strings.TrimSpace(toolName) + " returned an invalid evidence envelope",
+		Summary:       "tool returned an unstructured result",
+	}
+}
+
+// NewUnknownOperation is returned when a write may still be running after a
+// client-side timeout. Callers must query the operation state before retrying.
+func NewUnknownOperation(toolName string, operationID string, timeout time.Duration) Envelope {
+	return Envelope{
+		Success:     false,
+		Status:      StatusUnknown,
+		DataStatus:  DataUnknown,
+		OperationID: strings.TrimSpace(operationID),
+		ErrorCode:   "OPERATION_STATE_UNKNOWN",
+		Message:     fmt.Sprintf("write tool %s may still be running after %s; query operation state before retrying", strings.TrimSpace(toolName), timeout),
+		Summary:     "write operation state is unknown after timeout",
 	}
 }
 
@@ -154,6 +212,9 @@ func normalize(env *Envelope) {
 			env.CanUseAsEvidence = false
 		}
 		env.Observations = normalizeObservations(env.Observations)
+		if env.SourceKind == "" {
+			env.SourceKind, env.RuntimeVerified = inferSourceMetadata(env.Observations)
+		}
 		if strings.TrimSpace(env.Subject.Service) == "" && strings.TrimSpace(env.Subject.OrderNo) == "" && strings.TrimSpace(env.Subject.TraceID) == "" {
 			env.Subject, env.Scope = firstSubjectScope(env.Observations)
 		}
@@ -174,6 +235,45 @@ func normalize(env *Envelope) {
 	}
 	if strings.TrimSpace(env.Summary) == "" && env.Error != "" {
 		env.Summary = env.Error
+	}
+}
+
+func inferSourceMetadata(observations []Observation) (EvidenceSourceKind, bool) {
+	if len(observations) == 0 {
+		return "", false
+	}
+	var source EvidenceSourceKind
+	for _, observation := range observations {
+		candidate := sourceKindForObservation(observation.Kind)
+		if candidate == "" {
+			return "", false
+		}
+		if source == "" {
+			source = candidate
+			continue
+		}
+		if source != candidate {
+			return "", false
+		}
+	}
+	return source, source == SourceRuntimeMetric || source == SourceRuntimeLog || source == SourceRuntimeDB
+}
+
+func sourceKindForObservation(kind string) EvidenceSourceKind {
+	switch strings.TrimSpace(kind) {
+	case ObservationMetricAnomaly, ObservationMetricValue, ObservationStatusDistribution:
+		return SourceRuntimeMetric
+	case ObservationLogError:
+		return SourceRuntimeLog
+	case ObservationOrderState, ObservationStateMismatch, ObservationSlowSQL,
+		ObservationDatabaseHealth, ObservationActiveQuery, ObservationWaitEvent, ObservationLock:
+		return SourceRuntimeDB
+	case ObservationStaticCodeDeclaration, ObservationStaticCodeCallSite, ObservationStaticRoute, ObservationStaticSQL:
+		return SourceStaticCode
+	case ObservationStaticConfig:
+		return SourceStaticConfig
+	default:
+		return ""
 	}
 }
 

@@ -1,7 +1,7 @@
 package knowledge_index_pipeline
 
 import (
-	indexer2 "SREagent/internal/ai/indexer"
+	indexer2 "github.com/Thadopz/telltale/internal/ai/indexer"
 	"context"
 
 	"github.com/cloudwego/eino/components/indexer"
@@ -9,5 +9,5 @@ import (
 
 // newIndexer component initialization function of node 'RedisIndexer' in graph 'KnowledgeIndexing'
 func newIndexer(ctx context.Context) (idr indexer.Indexer, err error) {
-	return indexer2.NewMilvusIndexer(ctx)
+	return indexer2.NewSQLiteIndexer(ctx)
 }

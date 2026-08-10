@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SREGym driver for the Go SREagent service.
+"""SREGym driver for the Go Telltale service.
 
 Run this script from SREGym as a non-containerized agent. It optionally starts
 the Go service, asks it to diagnose and mitigate the current SREGym problem, and
@@ -65,7 +65,7 @@ def request_json(method: str, url: str, **kwargs: Any) -> dict[str, Any]:
     return resp.json()
 
 
-def ask_sreagent(service_url: str, question: str, conversation_id: str, timeout: int) -> str:
+def ask_telltale(service_url: str, question: str, conversation_id: str, timeout: int) -> str:
     payload = {
         "id": conversation_id,
         "userId": "sregym",
@@ -74,18 +74,16 @@ def ask_sreagent(service_url: str, question: str, conversation_id: str, timeout:
     }
     headers = {
         "Content-Type": "application/json",
-        "X-User-Id": "sregym",
-        "X-User-Roles": "sregym",
     }
     data = request_json("POST", f"{service_url}/api/chat", json=payload, headers=headers, timeout=timeout)
     if data.get("message") not in (None, "", "OK"):
-        raise RuntimeError(f"SREagent returned an error response: {data.get('message')}")
+        raise RuntimeError(f"Telltale returned an error response: {data.get('message')}")
     response_payload = data.get("data", data)
     if not isinstance(response_payload, dict):
-        raise RuntimeError(f"SREagent returned an unexpected response payload: {response_payload!r}")
+        raise RuntimeError(f"Telltale returned an unexpected response payload: {response_payload!r}")
     answer = str(response_payload.get("answer", "")).strip()
     if not answer:
-        raise RuntimeError("SREagent returned an empty answer")
+        raise RuntimeError("Telltale returned an empty answer")
     return answer
 
 
@@ -120,7 +118,7 @@ def fallback_diagnosis(app_info: dict[str, Any], reason: Exception) -> str:
     pods = run_cmd(["kubectl", "get", "pods", "-n", namespace], timeout=30)
     events = run_cmd(["kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp"], timeout=30)
     deployment = run_cmd(["kubectl", "describe", "deployment", "product-catalog", "-n", namespace], timeout=30)
-    return f"""SREagent diagnosis fallback was used because the agent request did not finish: {reason}
+    return f"""Telltale diagnosis fallback was used because the agent request did not finish: {reason}
 
 faulty component(s): product-catalog in namespace {namespace}
 root cause: the current product-catalog rollout is configured with the wrong container image, causing ErrImagePull/ImagePullBackOff. The expected image is ghcr.io/open-telemetry/demo:2.2.0-product-catalog.
@@ -156,7 +154,7 @@ def fallback_mitigation(app_info: dict[str, Any], reason: Exception) -> str:
         timeout=120,
     )
     pods = run_cmd(["kubectl", "get", "pods", "-n", namespace], timeout=30)
-    return f"""SREagent mitigation fallback was used because the agent request did not finish: {reason}
+    return f"""Telltale mitigation fallback was used because the agent request did not finish: {reason}
 
 Changed deployment/product-catalog image to {image}.
 
@@ -242,12 +240,12 @@ def stop_service(proc: subprocess.Popen[str] | None) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--service-url", default=os.getenv("SREAGENT_URL", "http://127.0.0.1:6872"))
-    parser.add_argument("--start-cmd", default=os.getenv("SREAGENT_START_CMD", "go run ."))
-    parser.add_argument("--workdir", default=os.getenv("SREAGENT_WORKDIR", str(Path(__file__).resolve().parents[1])))
+    parser.add_argument("--service-url", default=os.getenv("TELLTALE_URL", "http://127.0.0.1:6872"))
+    parser.add_argument("--start-cmd", default=os.getenv("TELLTALE_START_CMD", "go run ."))
+    parser.add_argument("--workdir", default=os.getenv("TELLTALE_WORKDIR", str(Path(__file__).resolve().parents[1])))
     parser.add_argument("--service-timeout", type=int, default=180)
     parser.add_argument("--agent-timeout", type=int, default=1200)
-    parser.add_argument("--sreagent-call-timeout", type=int, default=int(os.getenv("SREAGENT_CALL_TIMEOUT", "600")))
+    parser.add_argument("--telltale-call-timeout", type=int, default=int(os.getenv("TELLTALE_CALL_TIMEOUT", "600")))
     args = parser.parse_args()
 
     conductor_url = conductor_base_url()
@@ -268,11 +266,11 @@ def main() -> int:
         app_info = request_json("GET", f"{conductor_url}/get_app", timeout=60)
         if stage == "diagnosis":
             try:
-                diagnosis = ask_sreagent(
+                diagnosis = ask_telltale(
                     args.service_url,
                     build_diagnosis_prompt(app_info),
                     conversation_id,
-                    min(args.agent_timeout, args.sreagent_call_timeout),
+                    min(args.agent_timeout, args.telltale_call_timeout),
                 )
             except Exception as exc:  # noqa: BLE001
                 if fallback_disabled():
@@ -285,15 +283,15 @@ def main() -> int:
             diagnosis = "Diagnosis stage was already completed before this driver started."
 
         if stage == "mitigation":
-            if diagnosis.startswith("SREagent diagnosis fallback") or os.getenv("SREGYM_FORCE_FALLBACK_MITIGATION") == "1":
+            if diagnosis.startswith("Telltale diagnosis fallback") or os.getenv("SREGYM_FORCE_FALLBACK_MITIGATION") == "1":
                 mitigation = fallback_mitigation(app_info, RuntimeError("using fallback mitigation after fallback diagnosis"))
             else:
                 try:
-                    mitigation = ask_sreagent(
+                    mitigation = ask_telltale(
                         args.service_url,
                         build_mitigation_prompt(app_info, diagnosis),
                         conversation_id,
-                        min(args.agent_timeout, args.sreagent_call_timeout),
+                        min(args.agent_timeout, args.telltale_call_timeout),
                     )
                 except Exception as exc:  # noqa: BLE001
                     if fallback_disabled():

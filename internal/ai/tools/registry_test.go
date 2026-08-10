@@ -1,17 +1,17 @@
 package tools
 
 import (
-	"SREagent/internal/authz"
 	"context"
+	"github.com/Thadopz/telltale/internal/authz"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
 )
 
-func TestRegistryContinuesWhenMCPLogOptionalFails(t *testing.T) {
+func TestRegistryLoadsChatToolsWhenOptionalSourcesAreUnavailable(t *testing.T) {
 	ctx := context.Background()
-	tools, err := NewRegistry().ToolsFor(ctx, ScenarioAIOps)
+	tools, err := NewRegistry().ToolsFor(ctx, ScenarioChat)
 	if err != nil {
 		t.Fatalf("expected optional mcp log failure to be ignored, got err=%v", err)
 	}
@@ -20,11 +20,11 @@ func TestRegistryContinuesWhenMCPLogOptionalFails(t *testing.T) {
 	}
 }
 
-func TestRegistryIncludesReadOnlySlowSQLToolForAIOps(t *testing.T) {
+func TestRegistryIncludesReadOnlySlowSQLToolForChat(t *testing.T) {
 	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
-	tools, err := NewRegistry().ToolsFor(ctx, ScenarioAIOps)
+	tools, err := NewRegistry().ToolsFor(ctx, ScenarioChat)
 	if err != nil {
-		t.Fatalf("load aiops tools: %v", err)
+		t.Fatalf("load chat tools: %v", err)
 	}
 
 	for _, candidate := range tools {
@@ -32,10 +32,10 @@ func TestRegistryIncludesReadOnlySlowSQLToolForAIOps(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load tool info: %v", err)
 		}
-		if info.Name == "mysql_slow_sql" {
+		if info.Name == "db_slow_queries" {
 			meta, ok := LookupMetadata(info.Name)
 			if !ok {
-				t.Fatal("expected mysql_slow_sql metadata")
+				t.Fatal("expected db_slow_queries metadata")
 			}
 			if meta.Risk != RiskReadOnly || meta.RequiresConfirm {
 				t.Fatalf("expected read-only slow sql metadata, got %#v", meta)
@@ -44,14 +44,67 @@ func TestRegistryIncludesReadOnlySlowSQLToolForAIOps(t *testing.T) {
 		}
 	}
 
-	t.Fatal("expected mysql_slow_sql in aiops tool registry")
+	t.Fatal("expected db_slow_queries in chat tool registry")
 }
 
-func TestRegistryIncludesReadOnlyPaymentAgentToolsForAIOps(t *testing.T) {
+func TestDatabaseAgentOnlySeesFixedSemanticSQLTools(t *testing.T) {
 	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
-	tools, err := NewRegistry().ToolsFor(ctx, ScenarioAIOps)
+	toolsForAgent, err := NewRegistry().ToolsForAgent(ctx, ScenarioChat, authz.AgentScopeDatabase)
 	if err != nil {
-		t.Fatalf("load aiops tools: %v", err)
+		t.Fatalf("load database agent tools: %v", err)
+	}
+	names := toolNames(t, ctx, toolsForAgent)
+	want := map[string]bool{
+		"db_server_health":  true,
+		"db_active_queries": true,
+		"db_wait_events":    true,
+		"db_locks":          true,
+		"db_slow_queries":   true,
+	}
+	if len(names) != len(want) {
+		t.Fatalf("expected only semantic SQL tools, got %#v", names)
+	}
+	for name := range want {
+		if !names[name] {
+			t.Fatalf("expected database agent tool %s, got %#v", name, names)
+		}
+	}
+	if names["mysql_crud"] {
+		t.Fatal("mysql_crud must not be visible to database agent")
+	}
+	for _, legacyName := range []string{"mysql_server_health", "mysql_active_queries", "mysql_wait_events", "mysql_locks", "mysql_slow_sql"} {
+		if names[legacyName] {
+			t.Fatalf("legacy database tool %s must not be visible to database agent", legacyName)
+		}
+		metadata, ok := LookupMetadata(legacyName)
+		if !ok || metadata.AgentVisible {
+			t.Fatalf("legacy database tool %s must be hidden compatibility metadata", legacyName)
+		}
+	}
+}
+
+func TestDatabaseAgentToolDescriptionsDoNotAssumeMySQL(t *testing.T) {
+	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
+	toolsForAgent, err := NewRegistry().ToolsForAgent(ctx, ScenarioChat, authz.AgentScopeDatabase)
+	if err != nil {
+		t.Fatalf("load database agent tools: %v", err)
+	}
+	for _, candidate := range toolsForAgent {
+		info, err := candidate.Info(ctx)
+		if err != nil {
+			t.Fatalf("load database tool info: %v", err)
+		}
+		if strings.Contains(strings.ToLower(info.Name+" "+info.Desc), "mysql") {
+			t.Fatalf("database agent schema assumes mysql: %s - %s", info.Name, info.Desc)
+		}
+	}
+}
+
+func TestRegistryIncludesReadOnlyPaymentAgentToolsForChat(t *testing.T) {
+	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
+	tools, err := NewRegistry().ToolsFor(ctx, ScenarioChat)
+	if err != nil {
+		t.Fatalf("load chat tools: %v", err)
 	}
 
 	expected := map[string]bool{
@@ -81,7 +134,7 @@ func TestRegistryIncludesReadOnlyPaymentAgentToolsForAIOps(t *testing.T) {
 	}
 	for name, found := range expected {
 		if !found {
-			t.Fatalf("expected %s in aiops tool registry", name)
+			t.Fatalf("expected %s in chat tool registry", name)
 		}
 	}
 }
@@ -97,7 +150,7 @@ func TestRegistryFiltersToolsForViewer(t *testing.T) {
 	if !names["query_internal_docs"] || !names["get_current_time"] {
 		t.Fatalf("expected viewer docs/time tools, got %#v", names)
 	}
-	for _, denied := range []string{"query_prometheus_alerts", "mysql_crud", "mysql_slow_sql", "query_payment_anomaly"} {
+	for _, denied := range []string{"query_prometheus_alerts", "mysql_crud", "db_slow_queries", "query_payment_anomaly"} {
 		if names[denied] {
 			t.Fatalf("expected viewer not to see %s, got %#v", denied, names)
 		}
@@ -122,7 +175,7 @@ func TestRegistryGroupsChatToolsByDomain(t *testing.T) {
 	assertToolInDomain(t, byDomain, DomainGeneral, "get_current_time")
 	assertToolInDomain(t, byDomain, DomainObservability, "query_prometheus_alerts")
 	assertToolInDomain(t, byDomain, DomainDatabase, "mysql_crud")
-	assertToolInDomain(t, byDomain, DomainDatabase, "mysql_slow_sql")
+	assertToolInDomain(t, byDomain, DomainDatabase, "db_slow_queries")
 	assertToolInDomain(t, byDomain, DomainPayment, "query_payment_anomaly")
 	assertToolInDomain(t, byDomain, DomainKnowledge, "query_internal_docs")
 

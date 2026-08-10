@@ -1,7 +1,7 @@
 package actions
 
 import (
-	"SREagent/internal/authz"
+	"github.com/Thadopz/telltale/internal/authz"
 	"context"
 	"strings"
 	"testing"
@@ -78,4 +78,5 @@ func resetActionsForTest() {
 	store.Lock()
 	defer store.Unlock()
 	store.actions = make(map[string]pendingAction)
+	store.operations = make(map[string]OperationRecord)
 }

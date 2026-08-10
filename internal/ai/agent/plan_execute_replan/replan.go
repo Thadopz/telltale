@@ -1,8 +1,8 @@
 package plan_execute_replan
 
 import (
-	"SREagent/internal/ai/models"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/models"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"

@@ -1,7 +1,7 @@
 package mem
 
 import (
-	"SREagent/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -157,10 +157,10 @@ func formatEnvelopeSummary(env evidence.Envelope, raw string) string {
 		summary = strings.TrimSpace(raw)
 	}
 	if env.CanUseAsEvidence && strings.TrimSpace(env.EvidenceID) != "" {
-		return fmt.Sprintf("%s evidence_id=%s data_status=%s", summary, env.EvidenceID, env.DataStatus)
+		return fmt.Sprintf("%s evidence_id=%s data_status=%s%s", summary, env.EvidenceID, env.DataStatus, resultMetadataSummary(env.ResultMetadata))
 	}
 	if strings.TrimSpace(env.FailedQueryID) != "" {
-		return fmt.Sprintf("%s failed_query_id=%s data_status=%s", summary, env.FailedQueryID, env.DataStatus)
+		return fmt.Sprintf("%s failed_query_id=%s data_status=%s%s", summary, env.FailedQueryID, env.DataStatus, resultMetadataSummary(env.ResultMetadata))
 	}
 	return summary
 }
@@ -178,16 +178,17 @@ func saveToolResultByStorageID(ctx context.Context, storageID string, result Too
 	data := g.Map{
 		"conversation_id": storageID,
 		"tool_name":       result.ToolName,
-		"output_summary":  trimSessionStateText(result.OutputSummary, toolResultSummaryMaxChars),
+		"output_summary":  trimSessionStateText(redactText(result.OutputSummary), toolResultSummaryMaxChars),
 		"status":          result.Status,
 	}
 	structured := g.Map{}
-	if json.Valid([]byte(result.InputJSON)) {
-		data["input"] = result.InputJSON
+	if input := redactToolInput(result.InputJSON); input != "" {
+		data["input"] = input
 	}
-	if json.Valid([]byte(result.OutputJSON)) {
-		data["output"] = result.OutputJSON
-		env := evidence.Parse(result.OutputJSON).Envelope
+	output := redactToolOutput(result.OutputJSON)
+	if output != "" {
+		data["output"] = output
+		env := evidence.Parse(output).Envelope
 		structured = structuredEvidenceColumns(env)
 		for key, value := range structured {
 			data[key] = value
@@ -215,13 +216,30 @@ func ListUsableEvidence(ctx context.Context, conversationID string, limit int) (
 			continue
 		}
 		items = append(items, evidence.EvidenceItem{
-			EvidenceID:   env.EvidenceID,
-			ToolName:     row.ToolName,
-			Scope:        env.Scope,
-			Subject:      env.Subject,
-			Observations: env.Observations,
-			RawOutput:    json.RawMessage(row.Output),
-			Summary:      env.Summary,
+			EvidenceID:       env.EvidenceID,
+			ToolName:         row.ToolName,
+			SourceKind:       env.SourceKind,
+			Repository:       env.Repository,
+			Revision:         env.Revision,
+			SnapshotDigest:   env.SnapshotDigest,
+			VersionAlignment: env.VersionAlignment,
+			RuntimeVerified:  env.RuntimeVerified,
+			ContentTrust:     env.ContentTrust,
+			Issuer:           env.Issuer,
+			RunID:            env.RunID,
+			ConversationID:   env.ConversationID,
+			TenantID:         env.TenantID,
+			ObservedAt:       env.ObservedAt,
+			ExpiresAt:        env.ExpiresAt,
+			ContentDigest:    env.ContentDigest,
+			TrustLevel:       env.TrustLevel,
+			OperationID:      env.OperationID,
+			ResultMetadata:   env.ResultMetadata,
+			Scope:            env.Scope,
+			Subject:          env.Subject,
+			Observations:     env.Observations,
+			RawOutput:        json.RawMessage(row.Output),
+			Summary:          env.Summary,
 		})
 	}
 	return items, nil
@@ -287,6 +305,15 @@ func structuredEvidenceColumns(env evidence.Envelope) g.Map {
 		"failed_query_id":     env.FailedQueryID,
 		"can_use_as_evidence": env.CanUseAsEvidence,
 		"data_status":         env.DataStatus,
+		"issuer":              env.Issuer,
+		"run_id":              env.RunID,
+		"tenant_id":           env.TenantID,
+		"observed_at":         env.ObservedAt,
+		"expires_at":          env.ExpiresAt,
+		"content_digest":      env.ContentDigest,
+		"trust_level":         env.TrustLevel,
+		"operation_id":        env.OperationID,
+		"result_metadata":     marshalJSONValue(env.ResultMetadata),
 	}
 	if subject, err := json.Marshal(env.Subject); err == nil && string(subject) != "{}" {
 		columns["subject"] = string(subject)
@@ -300,12 +327,27 @@ func structuredEvidenceColumns(env evidence.Envelope) g.Map {
 	return columns
 }
 
+func resultMetadataSummary(metadata evidence.ResultMetadata) string {
+	if metadata.ReturnedRows == 0 && metadata.MaxRows == 0 && metadata.ReturnedBytes == 0 && metadata.MaxBytes == 0 && !metadata.Truncated {
+		return ""
+	}
+	return fmt.Sprintf(" returned_rows=%d max_rows=%d returned_bytes=%d max_bytes=%d truncated=%t", metadata.ReturnedRows, metadata.MaxRows, metadata.ReturnedBytes, metadata.MaxBytes, metadata.Truncated)
+}
+
+func marshalJSONValue(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil || string(encoded) == "{}" {
+		return ""
+	}
+	return string(encoded)
+}
+
 func isUnknownStructuredEvidenceColumn(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	for _, column := range []string{"evidence_id", "failed_query_id", "can_use_as_evidence", "data_status", "subject", "scope", "observations"} {
+	for _, column := range []string{"evidence_id", "failed_query_id", "can_use_as_evidence", "data_status", "subject", "scope", "observations", "issuer", "run_id", "tenant_id", "observed_at", "expires_at", "content_digest", "trust_level", "operation_id", "result_metadata"} {
 		if strings.Contains(msg, column) {
 			return true
 		}

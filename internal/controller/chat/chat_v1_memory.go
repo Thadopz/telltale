@@ -1,15 +1,12 @@
 package chat
 
 import (
-	"SREagent/api/chat/v1"
-	"SREagent/internal/authz"
-	"SREagent/utility/mem"
 	"context"
 	"fmt"
-	"strings"
+	"github.com/Thadopz/telltale/api/chat/v1"
+	"github.com/Thadopz/telltale/internal/authz"
+	"github.com/Thadopz/telltale/utility/mem"
 	"time"
-
-	"github.com/gogf/gf/v2/frame/g"
 )
 
 func (c *ControllerV1) MemoryList(ctx context.Context, req *v1.MemoryListReq) (*v1.MemoryListRes, error) {
@@ -91,10 +88,9 @@ func (c *ControllerV1) MemoryCandidateReject(ctx context.Context, req *v1.Memory
 }
 
 func memoryAPIUserID(ctx context.Context) (string, error) {
-	principal := authz.PrincipalFromRequest(ctx, g.RequestFromCtx(ctx), "")
-	userID := strings.TrimSpace(principal.UserID)
+	userID := authz.ConfiguredPrincipal(ctx).UserID
 	if userID == "" {
-		return "", fmt.Errorf("X-User-Id header is required")
+		return "", fmt.Errorf("identity.user_id is required")
 	}
 	return userID, nil
 }

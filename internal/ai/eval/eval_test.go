@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,8 @@ func TestRepositoryEvalCasesMatchTheirModes(t *testing.T) {
 		{mode: ModeContract, path: filepath.Join(evalRoot, "contract")},
 		{mode: ModeRouting, path: filepath.Join(evalRoot, "routing")},
 		{mode: ModeSmoke, path: filepath.Join(evalRoot, "smoke")},
+		{mode: ModeContextStress, path: filepath.Join(evalRoot, "context_stress")},
+		{mode: ModeQueryResultPressure, path: filepath.Join(evalRoot, "query_result_pressure")},
 	}
 
 	for _, suite := range suites {
@@ -121,6 +124,71 @@ func TestRunCasesRepeatsEachCase(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Attempt != 1 || results[1].Attempt != 2 {
 		t.Fatalf("unexpected repeated results: %#v", results)
+	}
+}
+
+func TestRunContextStressCaseExecutesBothVariants(t *testing.T) {
+	evalCase := Case{
+		ID:    "context-stress-run",
+		Query: "inspect payment callback",
+		ContextStress: &ContextStressSpec{
+			CriticalFacts:        append([]string(nil), contextStressDefaultFacts...),
+			HistoryNoisePairs:    20,
+			SummaryNoiseChars:    30000,
+			ToolResultNoiseChars: 30000,
+			DistractorToolCount:  100,
+		},
+		Claims: &evidence.ClaimSet{
+			SchemaVersion: evidence.ClaimSchemaVersion,
+			Claims: []evidence.CandidateClaim{{
+				ClaimID:       "claim-payment-log",
+				ClaimType:     evidence.ClaimPaymentLogError,
+				AssertionKind: evidence.AssertionFact,
+				EvidenceIDs:   []string{"ev_payment_callback_history"},
+				Subject:       evidence.SubjectRef{Service: "payment"},
+			}, {
+				ClaimID:       "claim-payment-cause",
+				ClaimType:     evidence.ClaimCallbackTimeoutRootCause,
+				AssertionKind: evidence.AssertionHypothesis,
+				EvidenceIDs:   []string{"ev_payment_callback_history"},
+				Subject:       evidence.SubjectRef{Service: "payment"},
+			}},
+		},
+		Expected: Expected{
+			RequiredAgents:    []string{"payment_agent"},
+			ArgumentContains:  map[string][]string{"payment_agent": {"payment callback"}},
+			RequireEvidenceID: true,
+			MaxToolCalls:      1,
+			MaxModelCalls:     4,
+			RequiredClaimTypes: []string{
+				evidence.ClaimPaymentLogError,
+				evidence.ClaimCallbackTimeoutRootCause,
+			},
+			ClaimCoverage: map[string]string{
+				"claim-payment-log":   evidence.CoverageCovered,
+				"claim-payment-cause": evidence.CoverageUnknown,
+			},
+		},
+	}
+
+	results, err := RunCases(context.Background(), []Case{evalCase}, RunOptions{
+		Mode:               ModeContextStress,
+		RunID:              "context-stress-test",
+		CaseTimeoutSeconds: 10,
+	})
+	if err != nil {
+		t.Fatalf("run context stress case: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected normal and stress results, got %d", len(results))
+	}
+	for _, result := range results {
+		if !result.Scores.Pass {
+			t.Fatalf("expected %s variant to pass, reasons=%v", result.Variant, result.Scores.Reasons)
+		}
+		if result.Context.RegisteredToolCount != 101 {
+			t.Fatalf("expected 101 visible tools, got %d", result.Context.RegisteredToolCount)
+		}
 	}
 }
 
@@ -232,6 +300,18 @@ func TestSafetyFailureAlwaysFailsQualityGate(t *testing.T) {
 	applyQualityGate(&summary, 0.90)
 	if summary.GatePass || summary.SafetyGatePass {
 		t.Fatalf("expected safety failure to fail quality gate: %#v", summary)
+	}
+}
+
+func TestContextStressQualityGateChecksEachVariant(t *testing.T) {
+	results := []EvalCaseResult{
+		{ID: "case", Variant: contextStressNormalVariant, Scores: EvalScores{Pass: true}},
+		{ID: "case", Variant: contextStressStressVariant, Scores: EvalScores{Pass: false}},
+	}
+	summary := Summarize(ModeContextStress, results)
+	applyQualityGate(&summary, 0.5)
+	if summary.VariantGatePass || summary.GatePass {
+		t.Fatalf("expected variant gate to reject a failed stress variant: %#v", summary)
 	}
 }
 

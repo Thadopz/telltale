@@ -1,9 +1,11 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/observability"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/authz"
+	"github.com/Thadopz/telltale/internal/observability"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -15,14 +17,19 @@ type observedDomainAgentTool struct {
 	inner  tool.InvokableTool
 	name   string
 	domain string
+	scope  authz.AgentScope
 }
 
-func newObservedDomainAgentTool(agentTool tool.BaseTool, name string, domain string) (tool.BaseTool, error) {
+func newObservedDomainAgentTool(agentTool tool.BaseTool, name string, domain string, scopes ...authz.AgentScope) (tool.BaseTool, error) {
 	invokable, ok := agentTool.(tool.InvokableTool)
 	if !ok {
 		return nil, fmt.Errorf("domain agent tool %s is not invokable", name)
 	}
-	return &observedDomainAgentTool{inner: invokable, name: name, domain: domain}, nil
+	scope := authz.AgentScope(name)
+	if len(scopes) > 0 && scopes[0] != "" {
+		scope = scopes[0]
+	}
+	return &observedDomainAgentTool{inner: invokable, name: name, domain: domain, scope: scope}, nil
 }
 
 func (t *observedDomainAgentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -37,6 +44,12 @@ func (t *observedDomainAgentTool) InvokableRun(ctx context.Context, argumentsInJ
 		attribute.String("agent.kind", "domain"),
 		attribute.String("agent.route.source", coordinatorDefinition.name),
 	)
+	ctx = authz.WithAgentScope(ctx, t.scope)
+	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapabilityWithCapabilities(
+		t.scope,
+		10*time.Minute,
+		agentCapabilities(t.scope, t.domain)...,
+	))
 	defer func() {
 		elapsed := time.Since(startedAt)
 		observability.RecordAgentRoute(ctx, t.name, t.domain, err)
@@ -45,4 +58,12 @@ func (t *observedDomainAgentTool) InvokableRun(ctx context.Context, argumentsInJ
 	}()
 
 	return t.inner.InvokableRun(ctx, argumentsInJSON, options...)
+}
+
+func agentCapabilities(scope authz.AgentScope, domain string) []string {
+	capabilities := []string{strings.TrimSpace(domain) + ".diagnose"}
+	if scope == authz.AgentScopePayment {
+		capabilities = append(capabilities, "code.read")
+	}
+	return capabilities
 }

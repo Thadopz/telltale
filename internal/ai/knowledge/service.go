@@ -1,9 +1,9 @@
 package knowledge
 
 import (
-	knowledgeRetriever "SREagent/internal/ai/retriever"
-	"SREagent/internal/authz"
-	"SREagent/internal/observability"
+	knowledgeRetriever "github.com/Thadopz/telltale/internal/ai/retriever"
+	"github.com/Thadopz/telltale/internal/authz"
+	"github.com/Thadopz/telltale/internal/observability"
 	"context"
 	"fmt"
 	"strings"
@@ -121,7 +121,7 @@ func (s *Service) getDefaultRetriever(ctx context.Context) (retriever.Retriever,
 	if s.defaultRetriever != nil {
 		return s.defaultRetriever, nil
 	}
-	created, err := knowledgeRetriever.NewMilvusRetriever(ctx)
+	created, err := knowledgeRetriever.NewSQLiteRetriever(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create knowledge retriever: %w", err)
 	}

@@ -40,6 +40,30 @@ func TestNewDataWithObservationsKeepsStructuredFields(t *testing.T) {
 	if env.Subject.Service != "payment" {
 		t.Fatalf("expected subject from observation, got %#v", env.Subject)
 	}
+	if env.SourceKind != SourceRuntimeMetric || !env.RuntimeVerified {
+		t.Fatalf("expected runtime metric provenance, got source=%q verified=%t", env.SourceKind, env.RuntimeVerified)
+	}
+}
+
+func TestStaticEvidenceKeepsUntrustedUnverifiedProvenance(t *testing.T) {
+	env := NewDataWithObservations("snippet", "static source", []Observation{{
+		Kind:    ObservationStaticCodeDeclaration,
+		Subject: SubjectRef{Type: "code", Service: "card-service"},
+	}})
+	env.SourceKind = SourceStaticCode
+	env.Repository = "card_service"
+	env.Revision = "rev-a"
+	env.SnapshotDigest = "digest-a"
+	env.VersionAlignment = VersionMismatch
+	env.RuntimeVerified = false
+	env.ContentTrust = ContentTrustUntrustedRepository
+	parsed := Parse(Marshal(env)).Envelope
+	if parsed.SourceKind != SourceStaticCode || parsed.RuntimeVerified || parsed.ContentTrust != ContentTrustUntrustedRepository {
+		t.Fatalf("expected static provenance to survive round trip, got %#v", parsed)
+	}
+	if parsed.VersionAlignment != VersionMismatch || parsed.SnapshotDigest != "digest-a" {
+		t.Fatalf("expected snapshot metadata to survive round trip, got %#v", parsed)
+	}
 }
 
 func TestNewErrorCreatesFailedQuery(t *testing.T) {

@@ -1,11 +1,12 @@
 package tools
 
 import (
-	"SREagent/internal/authz"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/authz"
 	"strings"
 	"time"
 
@@ -15,8 +16,10 @@ import (
 )
 
 type authorizedTool struct {
-	inner              tool.InvokableTool
-	overridePermission authz.Permission
+	inner                   tool.InvokableTool
+	overridePermission      authz.Permission
+	overrideAgentScopes     []authz.AgentScope
+	overrideExecutionPolicy ExecutionPolicy
 }
 
 func wrapAuthorizedTool(inner tool.InvokableTool) tool.InvokableTool {
@@ -25,6 +28,15 @@ func wrapAuthorizedTool(inner tool.InvokableTool) tool.InvokableTool {
 
 func wrapAuthorizedToolWithPermission(inner tool.InvokableTool, permission authz.Permission) tool.InvokableTool {
 	return &authorizedTool{inner: inner, overridePermission: permission}
+}
+
+func wrapAuthorizedToolWithPolicy(inner tool.InvokableTool, permission authz.Permission, scopes []authz.AgentScope, policy ExecutionPolicy) tool.InvokableTool {
+	return &authorizedTool{
+		inner:                   inner,
+		overridePermission:      permission,
+		overrideAgentScopes:     append([]authz.AgentScope(nil), scopes...),
+		overrideExecutionPolicy: policy,
+	}
 }
 
 func (t *authorizedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -37,14 +49,68 @@ func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", err
 	}
 	call := buildToolCall(ctx, info.Name, argumentsInJSON, t.overridePermission)
+	if len(t.overrideAgentScopes) > 0 {
+		call.AllowedAgentScopes = append([]authz.AgentScope(nil), t.overrideAgentScopes...)
+	}
 	decision := authz.NewAuthorizer().Authorize(ctx, call)
 	auditToolDecision(ctx, call, decision)
 	if !decision.Allowed {
 		return marshalToolError(nil, "tool authorization denied: "+decision.Reason), nil
 	}
+	policy := t.overrideExecutionPolicy
+	if policy == (ExecutionPolicy{}) {
+		policy = ExecutionPolicyFor(info.Name)
+	}
+	if call.Risk == authz.RiskWrite && !policy.Cancellable && !policy.OperationAware {
+		return marshalToolError(nil, "write tool is not cancellable or operation-aware"), nil
+	}
 
 	timeout := toolCallTimeout(ctx)
-	return invokeToolWithTimeout(ctx, t.inner, info.Name, argumentsInJSON, timeout, opts...)
+	output, invokeErr := invokeToolWithPolicyTimeout(ctx, t.inner, info.Name, argumentsInJSON, timeout, policy, call.OperationID, opts...)
+	if invokeErr == nil {
+		output = issueToolOutput(ctx, info.Name, output)
+		evidence.RecordRuntimeAnchors(ctx, evidence.Parse(output).Envelope)
+	}
+	return output, invokeErr
+}
+
+func issueToolOutput(ctx context.Context, toolName string, output string) string {
+	parsed := evidence.Parse(output)
+	if !parsed.IsJSON {
+		return evidence.Marshal(evidence.NewUnstructuredResult(toolName))
+	}
+	parsed.Envelope = evidence.SanitizeUntrustedEnvelope(parsed.Envelope)
+	if parsed.Envelope.Status == evidence.StatusSuccess && len(parsed.Envelope.Observations) == 0 {
+		envelope := parsed.Envelope
+		envelope.EvidenceID = ""
+		envelope.CanUseAsEvidence = false
+		if strings.TrimSpace(envelope.DataStatus) == "" || envelope.DataStatus == evidence.DataPresent {
+			envelope.DataStatus = evidence.DataUnknown
+		}
+		if strings.TrimSpace(envelope.FailureReason) == "" {
+			envelope.FailureReason = "unstructured_tool_result"
+		}
+		envelope.RuntimeVerified = false
+		return evidence.Marshal(envelope)
+	}
+	if parsed.Envelope.Status != evidence.StatusSuccess {
+		return evidence.Marshal(parsed.Envelope)
+	}
+
+	principal := authz.PrincipalFromContext(ctx)
+	trustLevel := evidence.ContentTrustTrustedLocal
+	if parsed.Envelope.TrustLevel == evidence.ContentTrustUntrustedExternal {
+		trustLevel = evidence.ContentTrustUntrustedExternal
+	}
+	issued := evidence.IssueEnvelope(parsed.Envelope, evidence.IssueMetadata{
+		Issuer:         "tool:" + toolName,
+		RunID:          evidence.RunIDFromContext(ctx),
+		ConversationID: contextString(ctx, "client_id"),
+		TenantID:       principal.TenantID,
+		TrustLevel:     trustLevel,
+		ExpiresAfter:   10 * time.Minute,
+	})
+	return evidence.Marshal(issued)
 }
 
 type toolRunResult struct {
@@ -60,6 +126,19 @@ func invokeToolWithTimeout(
 	timeout time.Duration,
 	opts ...tool.Option,
 ) (string, error) {
+	return invokeToolWithPolicyTimeout(ctx, inner, toolName, argumentsInJSON, timeout, ExecutionPolicy{ReadOnly: true, Cancellable: true, Idempotent: true}, "", opts...)
+}
+
+func invokeToolWithPolicyTimeout(
+	ctx context.Context,
+	inner tool.InvokableTool,
+	toolName string,
+	argumentsInJSON string,
+	timeout time.Duration,
+	policy ExecutionPolicy,
+	operationID string,
+	opts ...tool.Option,
+) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -72,15 +151,22 @@ func invokeToolWithTimeout(
 	select {
 	case result := <-resultCh:
 		if errors.Is(result.err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return toolTimeoutOutput(toolName, timeout), nil
+			return timeoutOutputForPolicy(toolName, timeout, policy, operationID), nil
 		}
 		return result.output, result.err
 	case <-runCtx.Done():
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return toolTimeoutOutput(toolName, timeout), nil
+		return timeoutOutputForPolicy(toolName, timeout, policy, operationID), nil
 	}
+}
+
+func timeoutOutputForPolicy(toolName string, timeout time.Duration, policy ExecutionPolicy, operationID string) string {
+	if !policy.ReadOnly && policy.OperationAware {
+		return evidence.Marshal(evidence.NewUnknownOperation(toolName, operationID, timeout))
+	}
+	return toolTimeoutOutput(toolName, timeout)
 }
 
 func toolTimeoutOutput(toolName string, timeout time.Duration) string {
@@ -104,15 +190,16 @@ func buildToolCall(ctx context.Context, toolName string, argumentsInJSON string,
 	risk := meta.Risk
 	requiresConfirm := meta.RequiresConfirm
 	operation := ""
+	operationID := operationIDFromArgs(argumentsInJSON)
 
 	if toolName == "mysql_crud" {
 		operation = mysqlOperateTypeFromArgs(argumentsInJSON)
 		if IsWriteOperation(operation) {
-			permission = authz.PermMySQLWrite
+			permission = authz.PermDatabaseWrite
 			risk = authz.RiskWrite
 			requiresConfirm = true
 		} else {
-			permission = authz.PermMySQLRead
+			permission = authz.PermDatabaseRead
 			risk = authz.RiskReadOnly
 			requiresConfirm = false
 		}
@@ -124,11 +211,27 @@ func buildToolCall(ctx context.Context, toolName string, argumentsInJSON string,
 		Risk:               risk,
 		RequiresConfirm:    requiresConfirm,
 		Confirmed:          authz.IsToolCallConfirmed(ctx, toolName, argumentsInJSON),
+		AgentScope:         authz.AgentScopeFromContext(ctx),
+		AllowedAgentScopes: meta.AllowedAgentScopes,
+		RequiredCapability: meta.RequiredCapability,
 		ConversationID:     contextString(ctx, "client_id"),
 		ArgumentsInJSON:    argumentsInJSON,
 		Operation:          operation,
+		OperationID:        operationID,
 		ServerWriteEnabled: mysqlWriteEnabled(ctx),
 	}
+}
+
+func operationIDFromArgs(argumentsInJSON string) string {
+	if strings.TrimSpace(argumentsInJSON) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(argumentsInJSON), &payload); err != nil {
+		return ""
+	}
+	value, _ := payload["operation_id"].(string)
+	return strings.TrimSpace(value)
 }
 
 func mysqlOperateTypeFromArgs(argumentsInJSON string) string {
@@ -149,16 +252,21 @@ func mysqlOperateTypeFromArgs(argumentsInJSON string) string {
 }
 
 func auditToolDecision(ctx context.Context, call authz.ToolCall, decision authz.Decision) {
+	if authz.QuietLogging(ctx) {
+		return
+	}
 	principal := authz.PrincipalFromContext(ctx)
 	g.Log().Infof(ctx,
-		"[authz] user=%s tenant=%s roles=%s tool=%s permission=%s risk=%s operation=%s conversation_id=%s allowed=%t reason=%s",
+		"[authz] user=%s tenant=%s roles=%s agent_scope=%s tool=%s permission=%s risk=%s operation=%s operation_id=%s conversation_id=%s allowed=%t reason=%s",
 		principal.UserID,
 		principal.TenantID,
 		strings.Join(principal.Roles, ","),
+		call.AgentScope,
 		call.Name,
 		call.Permission,
 		call.Risk,
 		call.Operation,
+		call.OperationID,
 		call.ConversationID,
 		decision.Allowed,
 		decision.Reason,

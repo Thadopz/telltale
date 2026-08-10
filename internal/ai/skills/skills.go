@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"github.com/Thadopz/telltale/internal/authz"
 	"context"
 	"fmt"
 	"os"
@@ -27,15 +28,30 @@ type Config struct {
 }
 
 type Skill struct {
-	Name        string
-	Description string
-	Path        string
-	Body        string
+	Name         string
+	Description  string
+	Domain       string
+	AgentScopes  []authz.AgentScope
+	Capabilities []string
+	Path         string
+	Body         string
 }
 
 type frontMatter struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Name         string             `yaml:"name"`
+	Description  string             `yaml:"description"`
+	Domain       string             `yaml:"domain"`
+	AgentScopes  []authz.AgentScope `yaml:"agent_scopes"`
+	Capabilities []string           `yaml:"capabilities"`
+}
+
+// SelectionContext is the explicit authority context used to decide whether a
+// skill may be shown to an agent. Query text can rank already-authorized
+// skills, but it cannot grant access to another domain.
+type SelectionContext struct {
+	AgentScope   authz.AgentScope
+	Domain       string
+	Capabilities []string
 }
 
 func LoadSelectedContext(ctx context.Context, query string) string {
@@ -43,7 +59,15 @@ func LoadSelectedContext(ctx context.Context, query string) string {
 	if !cfg.Enabled {
 		return ""
 	}
-	selected, err := Select(ctx, cfg, query)
+	selection := SelectionContext{
+		AgentScope:   authz.AgentScopeFromContext(ctx),
+		Capabilities: authz.AgentCapabilitiesFromContext(ctx),
+	}
+	if selection.AgentScope == "" {
+		selection.AgentScope = authz.AgentScopeCoordinator
+	}
+	selection.Domain = domainForScope(selection.AgentScope)
+	selected, err := SelectFor(ctx, cfg, query, selection)
 	if err != nil {
 		g.Log().Warningf(ctx, "load skills failed, err=%v", err)
 		return ""
@@ -71,6 +95,10 @@ func LoadConfig(ctx context.Context) Config {
 }
 
 func Select(ctx context.Context, cfg Config, query string) ([]Skill, error) {
+	return SelectFor(ctx, cfg, query, SelectionContext{})
+}
+
+func SelectFor(ctx context.Context, cfg Config, query string, selection SelectionContext) ([]Skill, error) {
 	_ = ctx
 	query = strings.TrimSpace(query)
 	if query == "" || cfg.MaxSelected <= 0 || len(cfg.Dirs) == 0 {
@@ -81,7 +109,13 @@ func Select(ctx context.Context, cfg Config, query string) ([]Skill, error) {
 	if err != nil {
 		return nil, err
 	}
-	scored := scoreSkills(query, all)
+	authorized := make([]Skill, 0, len(all))
+	for _, skill := range all {
+		if skillAllowedForSelection(skill, selection) {
+			authorized = append(authorized, skill)
+		}
+	}
+	scored := scoreSkills(query, authorized)
 	if len(scored) == 0 {
 		return nil, nil
 	}
@@ -159,11 +193,96 @@ func ParseFile(path string) (Skill, error) {
 		return Skill{}, fmt.Errorf("missing skill description")
 	}
 	return Skill{
-		Name:        meta.Name,
-		Description: meta.Description,
-		Path:        path,
-		Body:        body,
+		Name:         meta.Name,
+		Description:  meta.Description,
+		Domain:       strings.ToLower(strings.TrimSpace(meta.Domain)),
+		AgentScopes:  normalizeAgentScopes(meta.AgentScopes),
+		Capabilities: normalizeCapabilities(meta.Capabilities),
+		Path:         path,
+		Body:         body,
 	}, nil
+}
+
+func skillAllowedForSelection(skill Skill, selection SelectionContext) bool {
+	if selection.AgentScope == "" && strings.TrimSpace(selection.Domain) == "" && len(selection.Capabilities) == 0 {
+		return true
+	}
+	scope := authz.AgentScope(strings.ToLower(strings.TrimSpace(string(selection.AgentScope))))
+	domain := strings.ToLower(strings.TrimSpace(selection.Domain))
+	if len(skill.AgentScopes) > 0 {
+		matched := false
+		for _, candidate := range skill.AgentScopes {
+			if candidate == scope {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	} else if scope != authz.AgentScopeCoordinator {
+		// A domain agent cannot consume an unscoped skill. This keeps legacy
+		// descriptions from becoming an implicit cross-domain capability.
+		return false
+	}
+	if strings.TrimSpace(skill.Domain) != "" && strings.ToLower(skill.Domain) != domain {
+		return false
+	}
+	available := make(map[string]bool, len(selection.Capabilities))
+	for _, capability := range normalizeCapabilities(selection.Capabilities) {
+		available[capability] = true
+	}
+	for _, required := range skill.Capabilities {
+		if !available[required] {
+			return false
+		}
+	}
+	return true
+}
+
+func domainForScope(scope authz.AgentScope) string {
+	switch scope {
+	case authz.AgentScopePayment:
+		return "payment"
+	case authz.AgentScopeObservability:
+		return "observability"
+	case authz.AgentScopeDatabase:
+		return "database"
+	case authz.AgentScopeKnowledge:
+		return "knowledge"
+	default:
+		return "general"
+	}
+}
+
+func normalizeAgentScopes(scopes []authz.AgentScope) []authz.AgentScope {
+	seen := make(map[authz.AgentScope]bool, len(scopes))
+	result := make([]authz.AgentScope, 0, len(scopes))
+	for _, scope := range scopes {
+		scope = authz.AgentScope(strings.ToLower(strings.TrimSpace(string(scope))))
+		if scope == "" || seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		result = append(result, scope)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func normalizeCapabilities(capabilities []string) []string {
+	seen := make(map[string]bool, len(capabilities))
+	result := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if capability == "" || seen[capability] {
+			continue
+		}
+		seen[capability] = true
+		result = append(result, capability)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func FormatSelected(selected []Skill) string {

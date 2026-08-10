@@ -1,8 +1,8 @@
 package knowledge_index_pipeline
 
 import (
-	"SREagent/internal/ai/embedder"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/embedder"
 
 	"github.com/cloudwego/eino/components/embedding"
 )

@@ -1,8 +1,9 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/ai/input_preprocessor"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
+	"github.com/Thadopz/telltale/internal/ai/input_preprocessor"
 	"strings"
 	"time"
 
@@ -20,28 +21,36 @@ type ModelContext struct {
 	RequestAnalysis string
 	Skills          string
 	Date            string
+	Budget          contextbudget.BudgetReport `json:"-"`
+	BudgetError     string                     `json:"-"`
 }
 
 func AssembleModelContext(ctx context.Context, input *UserMessage, now time.Time) ModelContext {
+	modelContext := assembleRawModelContext(ctx, input, now)
+	return budgetModelContext(ctx, modelContext)
+}
+
+func assembleRawModelContext(ctx context.Context, input *UserMessage, now time.Time) ModelContext {
 	if input == nil {
 		return ModelContext{Date: now.Format("2006-01-02 15:04:05")}
 	}
 
 	processed := input_preprocessor.Process(ctx, input.Query, now)
-	return ModelContext{
+	modelContext := ModelContext{
 		Content:         processed.CleanQuery,
-		History:         budgetHistoryMessages(input.History, HistoryMaxChars),
-		Summary:         trimRunesHead(strings.TrimSpace(input.Summary), SummaryMaxChars),
-		SessionState:    trimRunesHead(strings.TrimSpace(input.SessionState), SessionStateMaxChars),
-		DurableMemory:   trimRunesHead(strings.TrimSpace(input.DurableMemory), DurableMemoryMaxChars),
-		ToolResults:     trimRunesHead(strings.TrimSpace(input.ToolResults), ToolResultsMaxChars),
+		History:         cloneHistory(input.History),
+		Summary:         strings.TrimSpace(input.Summary),
+		SessionState:    strings.TrimSpace(input.SessionState),
+		DurableMemory:   strings.TrimSpace(input.DurableMemory),
+		ToolResults:     strings.TrimSpace(input.ToolResults),
 		RequestAnalysis: processed.FormatPrompt(),
 		Date:            now.Format("2006-01-02 15:04:05"),
 	}
+	return modelContext
 }
 
 func (c ModelContext) PromptValues() map[string]any {
-	return map[string]any{
+	values := map[string]any{
 		"content":          c.Content,
 		"history":          c.History,
 		"summary":          c.Summary,
@@ -53,6 +62,14 @@ func (c ModelContext) PromptValues() map[string]any {
 		"skills":           c.Skills,
 		"date":             c.Date,
 	}
+	if c.Budget.FinalBudgetTokens > 0 || len(c.Budget.TrimmedLayers) > 0 {
+		// This private value is consumed by budgetAwareChatTemplate and is
+		// never rendered into the prompt. It lets model callbacks retain
+		// aggregate trimming metadata without putting prompt contents in the
+		// context or trace.
+		values[budgetReportPromptValueKey] = c.Budget
+	}
+	return values
 }
 
 func cloneHistory(history []*schema.Message) []*schema.Message {

@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"SREagent/internal/ai/evidence"
 	"context"
 	"encoding/json"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"net/http"
 	"net/http/httptest"
 	"net/url"

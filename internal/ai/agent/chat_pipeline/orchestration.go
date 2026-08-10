@@ -20,26 +20,27 @@ func BuildChatAgentWithOptions(ctx context.Context, opts ChatAgentOptions) (r co
 		InputToChat    = "InputToChat"
 	)
 
-	g := compose.NewGraph[*UserMessage, *schema.Message]()
-	if err = g.AddLambdaNode(PrepareContext, compose.InvokableLambda(newPrepareContextLambda), compose.WithNodeName("PrepareContext")); err != nil {
-		return nil, fmt.Errorf("add prepare context node: %w", err)
-	}
 	chatTemplate, err := newChatTemplate(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err = g.AddChatTemplateNode(ChatTemplate, chatTemplate); err != nil {
-		return nil, fmt.Errorf("add chat template node: %w", err)
-	}
-
-	adkAgent, err := newADKAgentLambdaWithOptions(ctx, opts)
+	adkAgent, promptOverhead, err := newADKAgentLambdaWithOptions(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if err = g.AddLambdaNode(ADKAgent, adkAgent, compose.WithNodeName("ADKChatModelAgent")); err != nil {
-		return nil, fmt.Errorf("add ADK agent node: %w", err)
+	budgetPlan := contextBudgetPlanForOptions(ctx, opts, promptOverhead)
+
+	g := compose.NewGraph[*UserMessage, *schema.Message]()
+	if err = g.AddLambdaNode(PrepareContext, compose.InvokableLambda(newPrepareContextLambdaWithPlan(budgetPlan)), compose.WithNodeName("PrepareContext")); err != nil {
+		return nil, fmt.Errorf("add prepare context node: %w", err)
 	}
-	if err = g.AddLambdaNode(InputToChat, compose.InvokableLambdaWithOption(newInputToChatLambda), compose.WithNodeName("UserMessageToChat")); err != nil {
+	if err = g.AddChatTemplateNode(ChatTemplate, chatTemplate); err != nil {
+		return nil, fmt.Errorf("add chat template node: %w", err)
+	}
+	if err = g.AddLambdaNode(ADKAgent, adkAgent, compose.WithNodeName("ADKChatModelAgent")); err != nil {
+		return nil, fmt.Errorf("add adk agent node: %w", err)
+	}
+	if err = g.AddLambdaNode(InputToChat, compose.InvokableLambdaWithOption(newInputToChatLambdaWithPlan(budgetPlan)), compose.WithNodeName("UserMessageToChat")); err != nil {
 		return nil, fmt.Errorf("add chat input node: %w", err)
 	}
 

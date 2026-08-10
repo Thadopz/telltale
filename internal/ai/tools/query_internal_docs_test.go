@@ -1,8 +1,8 @@
 package tools
 
 import (
-	"SREagent/internal/ai/knowledge"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/knowledge"
 	"strings"
 	"testing"
 
@@ -44,7 +44,7 @@ func TestQueryInternalDocsUsesSessionQueryCache(t *testing.T) {
 	}
 
 	if searcher.calls != 1 {
-		t.Fatalf("expected tool not to access Milvus after a cached equivalent query, got %d calls", searcher.calls)
+		t.Fatalf("expected tool not to access the retriever after a cached equivalent query, got %d calls", searcher.calls)
 	}
 	if !strings.Contains(output, "session query cache") {
 		t.Fatalf("expected cache result message, got %s", output)

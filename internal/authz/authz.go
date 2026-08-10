@@ -2,27 +2,44 @@ package authz
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
-	"github.com/gogf/gf/v2/net/ghttp"
 )
 
 type Permission string
 
 const (
-	PermDocsRead    Permission = "tool:docs.read"
-	PermMetricsRead Permission = "tool:metrics.read"
-	PermLogsRead    Permission = "tool:logs.read"
+	PermDocsRead      Permission = "tool:docs.read"
+	PermMetricsRead   Permission = "tool:metrics.read"
+	PermLogsRead      Permission = "tool:logs.read"
+	PermDatabaseRead  Permission = "tool:database.read"
+	PermDatabaseWrite Permission = "tool:database.write"
+	// PermMySQLRead and PermMySQLWrite are kept for old local configurations
+	// and confirmed human-only mysql_crud calls.
 	PermMySQLRead   Permission = "tool:mysql.read"
 	PermMySQLWrite  Permission = "tool:mysql.write"
 	PermPaymentRead Permission = "tool:payment.read"
+	PermCodeRead    Permission = "tool:code.read"
 	PermTimeRead    Permission = "tool:time.read"
 	PermSREGym      Permission = "tool:sregym"
+)
+
+type AgentScope string
+
+const (
+	AgentScopeCoordinator   AgentScope = "coordinator"
+	AgentScopePayment       AgentScope = "payment_agent"
+	AgentScopeObservability AgentScope = "observability_agent"
+	AgentScopeDatabase      AgentScope = "database_agent"
+	AgentScopeKnowledge     AgentScope = "knowledge_agent"
 )
 
 type RiskLevel string
@@ -44,10 +61,21 @@ type ToolCall struct {
 	Risk               RiskLevel
 	RequiresConfirm    bool
 	Confirmed          bool
+	AgentScope         AgentScope
+	AllowedAgentScopes []AgentScope
+	RequiredCapability string
 	ConversationID     string
 	ArgumentsInJSON    string
 	Operation          string
+	OperationID        string
 	ServerWriteEnabled bool
+}
+
+type AgentCapability struct {
+	Scope        AgentScope
+	TokenID      string
+	ExpiresAt    time.Time
+	Capabilities []string
 }
 
 type Decision struct {
@@ -59,6 +87,9 @@ type Authorizer struct{}
 
 type contextKey struct{}
 type confirmationContextKey struct{}
+type agentScopeContextKey struct{}
+type agentCapabilityContextKey struct{}
+type quietLoggingContextKey struct{}
 
 type ToolConfirmation struct {
 	Token         string
@@ -66,21 +97,95 @@ type ToolConfirmation struct {
 	ArgumentsHash string
 }
 
-const (
-	headerUserID   = "X-User-Id"
-	headerRoles    = "X-User-Roles"
-	headerTenantID = "X-Tenant-Id"
-)
+var deprecatedDatabasePermissionWarning sync.Once
 
 func WithPrincipal(ctx context.Context, principal Principal) context.Context {
 	return context.WithValue(ctx, contextKey{}, normalizePrincipal(ctx, principal))
+}
+
+func WithAgentScope(ctx context.Context, scope AgentScope) context.Context {
+	return context.WithValue(ctx, agentScopeContextKey{}, normalizeAgentScope(scope))
+}
+
+func AgentScopeFromContext(ctx context.Context) AgentScope {
+	scope, ok := ctx.Value(agentScopeContextKey{}).(AgentScope)
+	if !ok {
+		return ""
+	}
+	return normalizeAgentScope(scope)
+}
+
+func NewAgentCapability(scope AgentScope, lifetime time.Duration) AgentCapability {
+	return NewAgentCapabilityWithCapabilities(scope, lifetime)
+}
+
+func NewAgentCapabilityWithCapabilities(scope AgentScope, lifetime time.Duration, capabilities ...string) AgentCapability {
+	if lifetime <= 0 {
+		lifetime = 10 * time.Minute
+	}
+	return AgentCapability{
+		Scope:        normalizeAgentScope(scope),
+		TokenID:      randomTokenID(),
+		ExpiresAt:    time.Now().Add(lifetime),
+		Capabilities: normalizeCapabilities(capabilities),
+	}
+}
+
+func WithAgentCapability(ctx context.Context, capability AgentCapability) context.Context {
+	capability.Scope = normalizeAgentScope(capability.Scope)
+	capability.Capabilities = normalizeCapabilities(capability.Capabilities)
+	return context.WithValue(ctx, agentCapabilityContextKey{}, capability)
+}
+
+// WithQuietLogging suppresses diagnostic audit output for CLI commands whose
+// stdout is a result stream. It does not change authorization decisions.
+func WithQuietLogging(ctx context.Context) context.Context {
+	return context.WithValue(ctx, quietLoggingContextKey{}, true)
+}
+
+func QuietLogging(ctx context.Context) bool {
+	value, _ := ctx.Value(quietLoggingContextKey{}).(bool)
+	return value
+}
+
+func AgentCapabilityFromContext(ctx context.Context) (AgentCapability, bool) {
+	if ctx == nil {
+		return AgentCapability{}, false
+	}
+	capability, ok := ctx.Value(agentCapabilityContextKey{}).(AgentCapability)
+	if !ok || capability.TokenID == "" || capability.Scope == "" {
+		return AgentCapability{}, false
+	}
+	return capability, true
+}
+
+func AgentCapabilitiesFromContext(ctx context.Context) []string {
+	capability, ok := AgentCapabilityFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), capability.Capabilities...)
 }
 
 func PrincipalFromContext(ctx context.Context) Principal {
 	if principal, ok := ctx.Value(contextKey{}).(Principal); ok {
 		return normalizePrincipal(ctx, principal)
 	}
-	return normalizePrincipal(ctx, Principal{})
+	return ConfiguredPrincipal(ctx)
+}
+
+// ConfiguredPrincipal is the only identity source used by the standalone
+// runtime. There is no request-header or gateway-authentication identity.
+func ConfiguredPrincipal(ctx context.Context) Principal {
+	roles := []string{}
+	if value, err := g.Cfg().Get(ctx, "identity.roles"); err == nil && value != nil {
+		roles = value.Strings()
+	}
+	return normalizePrincipal(ctx, Principal{
+		UserID:   configString(ctx, "identity.user_id", "local-user"),
+		TenantID: configString(ctx, "identity.tenant_id", "local"),
+		Roles:    roles,
+	})
 }
 
 func WithToolConfirmation(ctx context.Context, confirmation ToolConfirmation) context.Context {
@@ -105,25 +210,21 @@ func HashArguments(argumentsInJSON string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func PrincipalFromRequest(ctx context.Context, req *ghttp.Request, fallbackUserID string) Principal {
-	principal := Principal{}
-	if req != nil {
-		principal.UserID = strings.TrimSpace(req.GetHeader(headerUserID))
-		principal.Roles = splitCSV(req.GetHeader(headerRoles))
-		principal.TenantID = strings.TrimSpace(req.GetHeader(headerTenantID))
-	}
-	if principal.UserID == "" {
-		principal.UserID = strings.TrimSpace(fallbackUserID)
-	}
-	return normalizePrincipal(ctx, principal)
-}
-
 func NewAuthorizer() *Authorizer {
 	return &Authorizer{}
 }
 
 func (a *Authorizer) Authorize(ctx context.Context, call ToolCall) Decision {
+	if len(call.AllowedAgentScopes) > 0 && !agentScopeAllowed(call.AgentScope, call.AllowedAgentScopes) {
+		return Decision{Allowed: false, Reason: "agent scope is not allowed"}
+	}
+	if call.RequiredCapability != "" && !agentCapabilityAllowed(ctx, call.AgentScope, call.RequiredCapability) {
+		return Decision{Allowed: false, Reason: "agent capability is missing or expired"}
+	}
 	if !permissionsEnabled(ctx) {
+		if !permissionsBypassAllowed(ctx) {
+			return Decision{Allowed: false, Reason: "permissions cannot be disabled outside test or eval environment"}
+		}
 		return Decision{Allowed: true, Reason: "permissions disabled"}
 	}
 	principal := PrincipalFromContext(ctx)
@@ -137,6 +238,9 @@ func (a *Authorizer) Authorize(ctx context.Context, call ToolCall) Decision {
 		if !call.ServerWriteEnabled {
 			return Decision{Allowed: false, Reason: "server write policy disabled"}
 		}
+		if strings.TrimSpace(call.OperationID) == "" {
+			return Decision{Allowed: false, Reason: "write operation requires operation_id"}
+		}
 		if call.RequiresConfirm && !call.Confirmed {
 			return Decision{Allowed: false, Reason: "write operation requires confirmation"}
 		}
@@ -146,7 +250,12 @@ func (a *Authorizer) Authorize(ctx context.Context, call ToolCall) Decision {
 
 func (p Principal) HasPermission(ctx context.Context, permission Permission) bool {
 	permissions := PermissionsForRoles(ctx, p.Roles)
-	return permissions[permission]
+	for _, alias := range permissionAliases(permission) {
+		if permissions[alias] {
+			return true
+		}
+	}
+	return false
 }
 
 func PermissionsForRoles(ctx context.Context, roles []string) map[Permission]bool {
@@ -154,10 +263,23 @@ func PermissionsForRoles(ctx context.Context, roles []string) map[Permission]boo
 	out := make(map[Permission]bool)
 	for _, role := range roles {
 		for _, permission := range scopesForRole(ctx, role) {
-			out[permission] = true
+			for _, alias := range permissionAliases(permission) {
+				out[alias] = true
+			}
 		}
 	}
 	return out
+}
+
+func permissionAliases(permission Permission) []Permission {
+	switch permission {
+	case PermDatabaseRead, PermMySQLRead:
+		return []Permission{PermDatabaseRead, PermMySQLRead}
+	case PermDatabaseWrite, PermMySQLWrite:
+		return []Permission{PermDatabaseWrite, PermMySQLWrite}
+	default:
+		return []Permission{permission}
+	}
 }
 
 func normalizePrincipal(ctx context.Context, principal Principal) Principal {
@@ -201,30 +323,38 @@ func scopesForRole(ctx context.Context, role string) []Permission {
 	if err == nil && v != nil {
 		rawScopes := v.Strings()
 		if len(rawScopes) > 0 {
-			return parsePermissions(rawScopes)
+			return parsePermissions(ctx, rawScopes)
 		}
 	}
 
 	switch role {
 	case "admin":
-		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermMySQLRead, PermMySQLWrite, PermSREGym}
+		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermDatabaseRead, PermDatabaseWrite, PermSREGym}
 	case "oncall":
-		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermMySQLRead}
+		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermPaymentRead, PermDatabaseRead}
 	case "sregym":
 		return []Permission{PermDocsRead, PermTimeRead, PermMetricsRead, PermLogsRead, PermSREGym}
+	case "code_reader":
+		return []Permission{PermCodeRead}
 	default:
 		return []Permission{PermDocsRead, PermTimeRead}
 	}
 }
 
-func parsePermissions(scopes []string) []Permission {
+func parsePermissions(ctx context.Context, scopes []string) []Permission {
 	out := make([]Permission, 0, len(scopes))
 	for _, scope := range scopes {
 		scope = strings.TrimSpace(scope)
 		if scope == "" {
 			continue
 		}
-		out = append(out, Permission(scope))
+		permission := Permission(scope)
+		if (permission == PermMySQLRead || permission == PermMySQLWrite) && !QuietLogging(ctx) {
+			deprecatedDatabasePermissionWarning.Do(func() {
+				g.Log().Warningf(ctx, "deprecated database permission %q; use tool:database.read or tool:database.write", permission)
+			})
+		}
+		out = append(out, permission)
 	}
 	return out
 }
@@ -235,6 +365,11 @@ func permissionsEnabled(ctx context.Context) bool {
 		return true
 	}
 	return v.Bool()
+}
+
+func permissionsBypassAllowed(ctx context.Context) bool {
+	environment := strings.ToLower(configString(ctx, "runtime.environment", "standalone"))
+	return environment == "test" || environment == "eval"
 }
 
 func configString(ctx context.Context, key string, fallback string) string {
@@ -248,17 +383,69 @@ func configString(ctx context.Context, key string, fallback string) string {
 	return fallback
 }
 
-func splitCSV(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
+func normalizeAgentScope(scope AgentScope) AgentScope {
+	return AgentScope(strings.ToLower(strings.TrimSpace(string(scope))))
+}
+
+func normalizeCapabilities(capabilities []string) []string {
+	seen := make(map[string]struct{}, len(capabilities))
+	result := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if capability == "" {
+			continue
+		}
+		if _, exists := seen[capability]; exists {
+			continue
+		}
+		seen[capability] = struct{}{}
+		result = append(result, capability)
 	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
+	sort.Strings(result)
+	return result
+}
+
+func agentScopeAllowed(scope AgentScope, allowed []AgentScope) bool {
+	scope = normalizeAgentScope(scope)
+	if scope == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		if scope == normalizeAgentScope(candidate) {
+			return true
 		}
 	}
-	return out
+	return false
+}
+
+func agentCapabilityAllowed(ctx context.Context, scope AgentScope, requiredCapability string) bool {
+	capability, ok := AgentCapabilityFromContext(ctx)
+	if !ok || capability.Scope != normalizeAgentScope(scope) {
+		return false
+	}
+	if !capability.ExpiresAt.IsZero() && !time.Now().Before(capability.ExpiresAt) {
+		return false
+	}
+	return capabilityHas(capability.Capabilities, requiredCapability)
+}
+
+func capabilityHas(capabilities []string, required string) bool {
+	required = strings.ToLower(strings.TrimSpace(required))
+	if required == "" {
+		return true
+	}
+	for _, capability := range capabilities {
+		if strings.EqualFold(strings.TrimSpace(capability), required) {
+			return true
+		}
+	}
+	return false
+}
+
+func randomTokenID() string {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("cap-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buffer)
 }

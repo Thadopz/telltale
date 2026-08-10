@@ -1,7 +1,7 @@
 package plan_execute_replan
 
 import (
-	"SREagent/internal/ai/agent/trace"
+	"github.com/Thadopz/telltale/internal/ai/agent/trace"
 	"context"
 	"fmt"
 

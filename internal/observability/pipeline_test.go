@@ -30,14 +30,14 @@ func TestAgentMetricsAreExported(t *testing.T) {
 
 	names := collectedMetricNames(metrics)
 	for _, expected := range []string{
-		"sreagent.agent.runs",
-		"sreagent.agent.duration",
-		"sreagent.agent.routes",
-		"sreagent.watcher.cycles",
-		"sreagent.watcher.cycle.duration",
-		"sreagent.watcher.rules",
-		"sreagent.watcher.rule.evaluations",
-		"sreagent.watcher.incident.transitions",
+		"telltale.agent.runs",
+		"telltale.agent.duration",
+		"telltale.agent.routes",
+		"telltale.watcher.cycles",
+		"telltale.watcher.cycle.duration",
+		"telltale.watcher.rules",
+		"telltale.watcher.rule.evaluations",
+		"telltale.watcher.incident.transitions",
 	} {
 		if !names[expected] {
 			t.Fatalf("expected metric %s, got %#v", expected, names)

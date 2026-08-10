@@ -1,10 +1,10 @@
 package tools
 
 import (
-	"SREagent/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"io"
 	"net/http"
 	"net/url"

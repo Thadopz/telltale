@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"SREagent/internal/authz"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/authz"
 
 	"github.com/cloudwego/eino/components/tool"
 )

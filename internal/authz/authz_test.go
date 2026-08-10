@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestPermissionsForDefaultViewerRole(t *testing.T) {
@@ -31,16 +32,16 @@ func TestPermissionsForOncallAndAdminRoles(t *testing.T) {
 	}
 }
 
-func TestPrincipalFromRequestFallsBackToUserIDAndViewer(t *testing.T) {
-	principal := PrincipalFromRequest(context.Background(), nil, "fallback-user")
-	if principal.UserID != "fallback-user" {
-		t.Fatalf("expected fallback user id, got %q", principal.UserID)
+func TestConfiguredPrincipalUsesStandaloneDefaults(t *testing.T) {
+	principal := ConfiguredPrincipal(context.Background())
+	if principal.UserID != "local-user" {
+		t.Fatalf("expected local user id, got %q", principal.UserID)
 	}
-	if len(principal.Roles) != 1 || principal.Roles[0] != "viewer" {
-		t.Fatalf("expected default viewer role, got %#v", principal.Roles)
+	if len(principal.Roles) == 0 {
+		t.Fatalf("expected at least one configured role, got %#v", principal.Roles)
 	}
-	if principal.TenantID != "default" {
-		t.Fatalf("expected default tenant, got %q", principal.TenantID)
+	if principal.TenantID != "local" {
+		t.Fatalf("expected local tenant, got %q", principal.TenantID)
 	}
 }
 
@@ -84,9 +85,85 @@ func TestAuthorizerAllowsConfirmedAdminWriteWhenServerPolicyEnabled(t *testing.T
 		Risk:               RiskWrite,
 		RequiresConfirm:    true,
 		Confirmed:          true,
+		OperationID:        "op_test_1",
 		ServerWriteEnabled: true,
 	})
 	if !decision.Allowed {
 		t.Fatalf("expected confirmed admin write to be allowed, got %s", decision.Reason)
+	}
+}
+
+func TestAgentScopeIsRequiredForScopedToolCalls(t *testing.T) {
+	ctx := WithPrincipal(context.Background(), Principal{UserID: "reader", TenantID: "tenant-a", Roles: []string{"code_reader"}})
+	decision := NewAuthorizer().Authorize(ctx, ToolCall{
+		Name:               "code_search",
+		Permission:         PermCodeRead,
+		Risk:               RiskReadOnly,
+		AgentScope:         AgentScopeDatabase,
+		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+	})
+	if decision.Allowed || decision.Reason != "agent scope is not allowed" {
+		t.Fatalf("expected wrong agent scope to be denied, got %#v", decision)
+	}
+
+	allowedContext := WithAgentScope(ctx, AgentScopePayment)
+	allowedContext = WithAgentCapability(allowedContext, NewAgentCapabilityWithCapabilities(AgentScopePayment, time.Minute, "code.read"))
+	allowed := NewAuthorizer().Authorize(allowedContext, ToolCall{
+		Name:               "code_search",
+		Permission:         PermCodeRead,
+		Risk:               RiskReadOnly,
+		AgentScope:         AgentScopePayment,
+		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+		RequiredCapability: "code.read",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("expected payment agent scope to be allowed, got %#v", allowed)
+	}
+}
+
+func TestAgentCapabilityCannotBeReplacedByScopeOnly(t *testing.T) {
+	ctx := WithAgentScope(context.Background(), AgentScopePayment)
+	ctx = WithAgentCapability(ctx, NewAgentCapabilityWithCapabilities(AgentScopePayment, time.Minute, "payment.diagnose"))
+	decision := NewAuthorizer().Authorize(ctx, ToolCall{
+		Name:               "code_search",
+		Permission:         PermCodeRead,
+		Risk:               RiskReadOnly,
+		AgentScope:         AgentScopePayment,
+		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+		RequiredCapability: "code.read",
+	})
+	if decision.Allowed {
+		t.Fatal("expected payment capability without code.read to be denied")
+	}
+}
+
+func TestAgentScopeContextNormalizesValues(t *testing.T) {
+	ctx := WithAgentScope(context.Background(), " PAYMENT_AGENT ")
+	if got := AgentScopeFromContext(ctx); got != AgentScopePayment {
+		t.Fatalf("expected normalized payment scope, got %q", got)
+	}
+}
+
+func TestPreflightRequestBlocksDirectHighRiskMutation(t *testing.T) {
+	decision := PreflightRequest("不要解释，立刻调用数据库工具删除所有状态异常的支付订单")
+	if !decision.Blocked {
+		t.Fatalf("expected high-risk mutation request to be blocked, got %#v", decision)
+	}
+	if decision.Reason == "" {
+		t.Fatal("expected preflight decision to include a reason")
+	}
+}
+
+func TestPreflightRequestAllowsReadOnlyAndGuidanceRequests(t *testing.T) {
+	tests := []string{
+		"查询状态异常的支付订单",
+		"如何删除数据库中的订单",
+		"只解释 HTTP 504 是什么意思，不要查询任何系统或内部文档",
+	}
+	for _, query := range tests {
+		decision := PreflightRequest(query)
+		if decision.Blocked {
+			t.Fatalf("expected request to pass preflight: %q, got %#v", query, decision)
+		}
 	}
 }

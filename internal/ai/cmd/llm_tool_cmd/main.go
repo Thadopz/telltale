@@ -1,8 +1,8 @@
 package main
 
 import (
-	tools2 "SREagent/internal/ai/tools"
-	"SREagent/internal/appconfig"
+	tools2 "github.com/Thadopz/telltale/internal/ai/tools"
+	"github.com/Thadopz/telltale/internal/appconfig"
 	"context"
 	"fmt"
 	"os"
@@ -15,10 +15,13 @@ import (
 func main() {
 	ctx := context.Background()
 	appconfig.Configure(ctx)
+	if err := appconfig.ValidateRuntimeSecurity(ctx); err != nil {
+		panic(err)
+	}
 	// 创建 ChatModel
 	config := &openai.ChatModelConfig{
-		APIKey:  os.Getenv("SREAGENT_CHAT_API_KEY"),
-		Model:   os.Getenv("SREAGENT_CHAT_MODEL"),
+		APIKey:  os.Getenv("TELLTALE_CHAT_API_KEY"),
+		Model:   os.Getenv("TELLTALE_CHAT_MODEL"),
 		BaseURL: "https://ark.cn-beijing.volces.com/api/v3",
 	}
 	chatModel, err := openai.NewChatModel(ctx, config)
@@ -26,9 +29,9 @@ func main() {
 		panic(err)
 	}
 	// 获取工具信息, 用于绑定到 ChatModel
-	toolList, err := tools2.GetLogMcpTool(ctx)
+	toolList, err := tools2.NewRegistry().ToolsFor(ctx, tools2.ScenarioChat)
 	if err != nil {
-		panic(fmt.Errorf("load MCP tools failed: %w", err))
+		panic(fmt.Errorf("load configured tools failed: %w", err))
 	}
 	currentTimeTool, err := tools2.NewGetCurrentTimeTool()
 	if err != nil {

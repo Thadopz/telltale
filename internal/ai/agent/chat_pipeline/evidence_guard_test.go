@@ -1,80 +1,56 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/ai/agent/trace"
-	"SREagent/internal/ai/evidence"
-	"strings"
+	"github.com/Thadopz/telltale/internal/ai/agent/trace"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"testing"
+	"time"
 )
 
-func TestComposeCoverageAnswerUsesGenericRulesWithoutPaymentSignal(t *testing.T) {
-	got := composeCoverageAnswer("service has error logs", []trace.AgentStep{
-		failedToolStep("kubectl_logs", "fq_1"),
-	})
-	if !strings.Contains(got, evidence.ClaimLogError) {
-		t.Fatalf("expected generic log claim, got %q", got)
+func TestMatchClaimSetUsesExplicitEvidenceAndUnifiedRules(t *testing.T) {
+	claimSet := evidence.ClaimSet{
+		SchemaVersion: evidence.ClaimSchemaVersion,
+		Claims: []evidence.CandidateClaim{{
+			ClaimID:       "claim-payment-log",
+			ClaimType:     evidence.ClaimPaymentLogError,
+			AssertionKind: evidence.AssertionFact,
+			EvidenceIDs:   []string{"ev_log"},
+			Subject:       evidence.SubjectRef{Service: "payment"},
+		}},
 	}
-	if strings.Contains(got, evidence.ClaimPaymentLogError) {
-		t.Fatalf("did not expect payment claim, got %q", got)
-	}
-}
-
-func TestComposeCoverageAnswerEnablesPaymentRulesForPaymentSignal(t *testing.T) {
-	got := composeCoverageAnswer("payment failure has error logs", []trace.AgentStep{
-		failedToolStep("search_payment_logs", "fq_1"),
-	})
-	if !strings.Contains(got, evidence.ClaimPaymentLogError) {
-		t.Fatalf("expected payment log claim, got %q", got)
-	}
-}
-
-func TestComposeCoverageAnswerKeepsCallbackPaymentRule(t *testing.T) {
-	got := composeCoverageAnswer("payment callback root cause confirmed for failure timeout log", []trace.AgentStep{
-		successToolStep("query_payment_anomaly", "ev_1", evidence.ObservationMetricAnomaly, evidence.SubjectRef{Type: "payment", Service: "payment"}),
-		successToolStep("search_payment_logs", "ev_2", evidence.ObservationLogError, evidence.SubjectRef{Type: "service", Service: "callback"}),
-	})
-	if !strings.Contains(got, evidence.ClaimCallbackTimeoutRootCause) {
-		t.Fatalf("expected callback root cause claim, got %q", got)
-	}
-	if !strings.Contains(got, "mechanism_or_runbook") {
-		t.Fatalf("expected callback rule to require mechanism evidence, got %q", got)
+	reports := matchClaimSet(claimSet, []evidence.EvidenceItem{{
+		EvidenceID:      "ev_log",
+		SourceKind:      evidence.SourceRuntimeLog,
+		RuntimeVerified: true,
+		ObservedAt:      time.Now().UTC(),
+		Subject:         evidence.SubjectRef{Service: "payment"},
+		Observations:    []evidence.Observation{{Kind: evidence.ObservationLogError, Subject: evidence.SubjectRef{Service: "payment"}}},
+	}}, nil)
+	if len(reports) != 1 || reports[0].Status != evidence.CoverageCovered {
+		t.Fatalf("expected explicit payment claim to be covered, got %#v", reports)
 	}
 }
 
-func failedToolStep(name string, failedQueryID string) trace.AgentStep {
-	return trace.AgentStep{
-		Phase: "error",
-		Name:  name,
-		Output: evidence.Marshal(evidence.Envelope{
-			Success:       false,
-			Status:        evidence.StatusTimeout,
-			FailedQueryID: failedQueryID,
-			DataStatus:    evidence.DataUnknown,
-			Message:       "tool query timed out",
-			Summary:       "tool query timed out",
-		}),
-	}
-}
-
-func successToolStep(name string, evidenceID string, observationKind string, subject evidence.SubjectRef) trace.AgentStep {
-	return trace.AgentStep{
-		Phase: "end",
-		Name:  name,
-		Output: evidence.Marshal(evidence.Envelope{
+func TestEvidenceFromToolEvidenceKeepsStructuredEnvelope(t *testing.T) {
+	items, failed := evidenceFromToolEvidence([]trace.ToolEvidence{{
+		ToolName: "runtime_logs",
+		Envelope: evidence.Envelope{
 			Success:          true,
 			Status:           evidence.StatusSuccess,
-			EvidenceID:       evidenceID,
+			EvidenceID:       "ev_log",
 			CanUseAsEvidence: true,
-			DataStatus:       evidence.DataPresent,
-			Data:             map[string]string{"result": "present"},
-			Subject:          subject,
+			SourceKind:       evidence.SourceRuntimeLog,
+			RuntimeVerified:  true,
+			ObservedAt:       time.Now().UTC(),
 			Observations: []evidence.Observation{{
-				Kind:    observationKind,
-				Subject: subject,
-				Summary: observationKind,
+				Kind: evidence.ObservationLogError,
 			}},
-			Message: "tool query completed",
-			Summary: "tool query completed",
-		}),
+		},
+	}})
+	if len(failed) != 0 || len(items) != 1 {
+		t.Fatalf("expected one structured evidence item, items=%#v failed=%#v", items, failed)
+	}
+	if items[0].EvidenceID != "ev_log" || items[0].SourceKind != evidence.SourceRuntimeLog {
+		t.Fatalf("structured evidence was not preserved: %#v", items[0])
 	}
 }

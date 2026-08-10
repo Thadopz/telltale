@@ -3,10 +3,9 @@ package tools
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 
+	"github.com/Thadopz/telltale/internal/ai/sqlobserve"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/gogf/gf/v2/frame/g"
@@ -18,6 +17,7 @@ type MysqlCrudInput struct {
 	DSN         string `json:"dsn,omitempty" jsonschema:"description=Deprecated. The server configured DSN is always used; user supplied DSN values are ignored"`
 	SQL         string `json:"sql" jsonschema:"description=The SQL query to execute against the configured MySQL database"`
 	OperateType string `json:"operate_type" jsonschema:"description=The SQL operation type: query, insert, update, or delete"`
+	OperationID string `json:"operation_id,omitempty" jsonschema:"description=Required for write operations and used to query operation state after a timeout"`
 }
 
 func NewMysqlCrudTool() (tool.InvokableTool, error) {
@@ -48,6 +48,9 @@ func NewMysqlCrudTool() (tool.InvokableTool, error) {
 					fmt.Errorf("mysql %s is disabled by tool policy", input.OperateType),
 					"mysql write operations require explicit server configuration",
 				), nil
+			}
+			if IsWriteOperation(input.OperateType) && strings.TrimSpace(input.OperationID) == "" {
+				return marshalToolError(fmt.Errorf("operation_id is required for mysql writes"), "invalid mysql operation"), nil
 			}
 
 			dsn, err := configuredMysqlDSN(ctx)
@@ -86,72 +89,8 @@ func NewMysqlCrudTool() (tool.InvokableTool, error) {
 	return t, nil
 }
 
-var (
-	mysqlLimitCommaPattern = regexp.MustCompile(`(?i)\blimit\s+([0-9]+)\s*,\s*([0-9]+)\b`)
-	mysqlLimitCountPattern = regexp.MustCompile(`(?i)\blimit\s+([0-9]+)(\s+offset\s+[0-9]+)?\b`)
-)
-
 func guardReadOnlySQL(ctx context.Context, sql string) (string, error) {
-	trimmed := strings.TrimSpace(sql)
-	if trimmed == "" {
-		return "", fmt.Errorf("empty sql")
-	}
-	trimmed = strings.TrimSuffix(trimmed, ";")
-	if strings.Contains(trimmed, ";") {
-		return "", fmt.Errorf("multiple mysql statements are not allowed")
-	}
-
-	lower := strings.ToLower(strings.TrimSpace(trimmed))
-	if strings.Contains(lower, "--") || strings.Contains(lower, "/*") || strings.Contains(lower, "*/") || strings.Contains(lower, "#") {
-		return "", fmt.Errorf("sql comments are not allowed")
-	}
-	if hasForbiddenSQLKeyword(lower) {
-		return "", fmt.Errorf("sql contains a forbidden keyword")
-	}
-	if !(strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "show ") || strings.HasPrefix(lower, "explain ")) {
-		return "", fmt.Errorf("only SELECT, SHOW, and EXPLAIN statements are allowed")
-	}
-
-	if strings.HasPrefix(lower, "select ") {
-		return applySelectLimit(ctx, trimmed), nil
-	}
-	return trimmed, nil
-}
-
-func hasForbiddenSQLKeyword(lowerSQL string) bool {
-	for _, keyword := range []string{
-		"insert", "update", "delete", "drop", "alter", "create", "truncate", "replace",
-		"grant", "revoke", "call", "set", "commit", "rollback", "start", "begin",
-		"lock", "unlock", "load", "outfile", "dumpfile", "into outfile", "into dumpfile",
-	} {
-		if regexp.MustCompile(`\b`+regexp.QuoteMeta(keyword)+`\b`).FindStringIndex(lowerSQL) != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func applySelectLimit(ctx context.Context, sql string) string {
-	maxRows := mysqlMaxRows(ctx)
-	if maxRows <= 0 {
-		return sql
-	}
-	if matches := mysqlLimitCommaPattern.FindStringSubmatchIndex(sql); matches != nil {
-		return clampSQLNumberAt(sql, matches[4], matches[5], maxRows)
-	}
-	if matches := mysqlLimitCountPattern.FindStringSubmatchIndex(sql); matches != nil {
-		return clampSQLNumberAt(sql, matches[2], matches[3], maxRows)
-	}
-	return fmt.Sprintf("%s LIMIT %d", sql, maxRows)
-}
-
-func clampSQLNumberAt(sql string, start int, end int, maxRows int) string {
-	limitText := sql[start:end]
-	limit, err := strconv.Atoi(limitText)
-	if err != nil || limit > maxRows {
-		return sql[:start] + strconv.Itoa(maxRows) + sql[end:]
-	}
-	return sql
+	return sqlobserve.GuardMySQLReadOnly(sql, mysqlMaxRows(ctx))
 }
 
 func mysqlMaxRows(ctx context.Context) int {
@@ -175,37 +114,5 @@ func mysqlWriteEnabled(ctx context.Context) bool {
 }
 
 func configuredMysqlDSN(ctx context.Context) (string, error) {
-	user, err := cfgString(ctx, "database.default.user")
-	if err != nil {
-		return "", err
-	}
-	pass, err := cfgString(ctx, "database.default.pass")
-	if err != nil {
-		return "", err
-	}
-	host, err := cfgString(ctx, "database.default.host")
-	if err != nil {
-		return "", err
-	}
-	port, err := cfgString(ctx, "database.default.port")
-	if err != nil {
-		return "", err
-	}
-	name, err := cfgString(ctx, "database.default.name")
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local", user, pass, host, port, name), nil
-}
-
-func cfgString(ctx context.Context, key string) (string, error) {
-	v, err := g.Cfg().Get(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	s := strings.TrimSpace(v.String())
-	if s == "" {
-		return "", fmt.Errorf("missing config %s", key)
-	}
-	return s, nil
+	return sqlobserve.ConfiguredMysqlDSN(ctx, "default")
 }

@@ -2,13 +2,18 @@ package evidence
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 )
 
 type FieldRequirement struct {
-	Field            string   `json:"field"`
-	ObservationKinds []string `json:"observation_kinds,omitempty"`
-	ClaimField       string   `json:"claim_field,omitempty"`
+	Field               string               `json:"field"`
+	ObservationKinds    []string             `json:"observation_kinds,omitempty"`
+	ClaimField          string               `json:"claim_field,omitempty"`
+	AllowedSourceKinds  []EvidenceSourceKind `json:"allowed_source_kinds,omitempty"`
+	RequireRuntime      bool                 `json:"require_runtime_verified,omitempty"`
+	RequireVersionMatch bool                 `json:"require_version_alignment,omitempty"`
 }
 
 type ConflictCheck struct {
@@ -17,17 +22,23 @@ type ConflictCheck struct {
 }
 
 type ClaimRule struct {
-	ClaimType      string             `json:"claim_type"`
-	Required       []FieldRequirement `json:"required"`
-	Optional       []FieldRequirement `json:"optional,omitempty"`
-	ConflictChecks []ConflictCheck    `json:"conflict_checks,omitempty"`
+	ClaimType              string             `json:"claim_type"`
+	Required               []FieldRequirement `json:"required"`
+	AlternativeRequired    []FieldRequirement `json:"alternative_required,omitempty"`
+	Optional               []FieldRequirement `json:"optional,omitempty"`
+	ConflictChecks         []ConflictCheck    `json:"conflict_checks,omitempty"`
+	RequiresCompleteResult bool               `json:"requires_complete_result,omitempty"`
 }
 
 type FieldMatch struct {
-	Field      string `json:"field"`
-	EvidenceID string `json:"evidence_id"`
-	ToolName   string `json:"tool_name,omitempty"`
-	Summary    string `json:"summary,omitempty"`
+	Field            string             `json:"field"`
+	EvidenceID       string             `json:"evidence_id"`
+	ToolName         string             `json:"tool_name,omitempty"`
+	SourceKind       EvidenceSourceKind `json:"source_kind,omitempty"`
+	Revision         string             `json:"revision,omitempty"`
+	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
+	RuntimeVerified  bool               `json:"runtime_verified"`
+	Summary          string             `json:"summary,omitempty"`
 }
 
 type FieldConflict struct {
@@ -40,6 +51,7 @@ type FieldConflict struct {
 type CoverageReport struct {
 	Claim              CandidateClaim     `json:"claim"`
 	Status             string             `json:"status"`
+	EvidenceConflicts  []EvidenceConflict `json:"evidence_conflicts,omitempty"`
 	MatchedFields      []FieldMatch       `json:"matched_fields,omitempty"`
 	MissingFields      []FieldRequirement `json:"missing_fields,omitempty"`
 	ConflictFields     []FieldConflict    `json:"conflict_fields,omitempty"`
@@ -73,31 +85,64 @@ func DefaultClaimRules() map[string]ClaimRule {
 	return map[string]ClaimRule{
 		ClaimMetricAnomaly: {
 			ClaimType: ClaimMetricAnomaly,
-			Required:  []FieldRequirement{{Field: "metric_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}}},
+			Required:  []FieldRequirement{{Field: "metric_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true}},
 		},
 		ClaimMetricValue: {
 			ClaimType: ClaimMetricValue,
-			Required:  []FieldRequirement{{Field: "metric_value", ObservationKinds: []string{ObservationMetricValue}}},
+			Required:  []FieldRequirement{{Field: "metric_value", ObservationKinds: []string{ObservationMetricValue}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true}},
 		},
 		ClaimLogError: {
 			ClaimType: ClaimLogError,
-			Required:  []FieldRequirement{{Field: "log_error", ObservationKinds: []string{ObservationLogError}}},
+			Required:  []FieldRequirement{{Field: "log_error", ObservationKinds: []string{ObservationLogError}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeLog}, RequireRuntime: true}},
 		},
 		ClaimStatusDistribution: {
-			ClaimType: ClaimStatusDistribution,
-			Required:  []FieldRequirement{{Field: "status_distribution", ObservationKinds: []string{ObservationStatusDistribution}}},
+			ClaimType:              ClaimStatusDistribution,
+			Required:               []FieldRequirement{{Field: "status_distribution", ObservationKinds: []string{ObservationStatusDistribution}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true}},
+			RequiresCompleteResult: true,
 		},
 		ClaimStateMismatch: {
 			ClaimType: ClaimStateMismatch,
-			Required:  []FieldRequirement{{Field: "state_mismatch", ObservationKinds: []string{ObservationStateMismatch}}},
+			Required:  []FieldRequirement{{Field: "state_mismatch", ObservationKinds: []string{ObservationStateMismatch}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeDB}, RequireRuntime: true}},
 		},
 		ClaimSlowSQL: {
 			ClaimType: ClaimSlowSQL,
-			Required:  []FieldRequirement{{Field: "slow_sql", ObservationKinds: []string{ObservationSlowSQL}}},
+			Required:  []FieldRequirement{{Field: "slow_sql", ObservationKinds: []string{ObservationSlowSQL}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeDB}, RequireRuntime: true}},
 		},
 		ClaimRunbookRule: {
 			ClaimType: ClaimRunbookRule,
 			Required:  []FieldRequirement{{Field: "runbook_rule", ObservationKinds: []string{ObservationRunbookRule}}},
+		},
+		ClaimImplementationContains: {
+			ClaimType: ClaimImplementationContains,
+			Required: []FieldRequirement{{
+				Field:              "implementation_contains",
+				ObservationKinds:   []string{ObservationStaticCodeDeclaration, ObservationStaticConfig},
+				AllowedSourceKinds: []EvidenceSourceKind{SourceStaticCode, SourceStaticConfig},
+			}},
+		},
+		ClaimImplementationMayCall: {
+			ClaimType: ClaimImplementationMayCall,
+			Required: []FieldRequirement{{
+				Field:              "implementation_may_call",
+				ObservationKinds:   []string{ObservationStaticCodeCallSite},
+				AllowedSourceKinds: []EvidenceSourceKind{SourceStaticCode},
+			}},
+		},
+		ClaimConfigValueDefined: {
+			ClaimType: ClaimConfigValueDefined,
+			Required: []FieldRequirement{{
+				Field:              "config_value_defined",
+				ObservationKinds:   []string{ObservationStaticConfig},
+				AllowedSourceKinds: []EvidenceSourceKind{SourceStaticConfig},
+			}},
+		},
+		ClaimErrorMappedAtCodeLocation: {
+			ClaimType: ClaimErrorMappedAtCodeLocation,
+			Required: []FieldRequirement{{
+				Field:              "error_mapped_at_code_location",
+				ObservationKinds:   []string{ObservationStaticCodeDeclaration},
+				AllowedSourceKinds: []EvidenceSourceKind{SourceStaticCode},
+			}},
 		},
 	}
 }
@@ -106,38 +151,47 @@ func PaymentClaimRules() map[string]ClaimRule {
 	return map[string]ClaimRule{
 		ClaimPaymentMetricAbnormal: {
 			ClaimType: ClaimPaymentMetricAbnormal,
-			Required:  []FieldRequirement{{Field: "payment_metric_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}}},
+			Required:  []FieldRequirement{{Field: "payment_metric_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true}},
 		},
 		ClaimPaymentOrderState: {
 			ClaimType: ClaimPaymentOrderState,
-			Required:  []FieldRequirement{{Field: "payment_order_state", ObservationKinds: []string{ObservationOrderState}}},
+			Required:  []FieldRequirement{{Field: "payment_order_state", ObservationKinds: []string{ObservationOrderState}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeDB}, RequireRuntime: true}},
 		},
 		ClaimPaymentStateMismatch: {
 			ClaimType: ClaimPaymentStateMismatch,
-			Required:  []FieldRequirement{{Field: "payment_state_mismatch", ObservationKinds: []string{ObservationStateMismatch}}},
+			Required:  []FieldRequirement{{Field: "payment_state_mismatch", ObservationKinds: []string{ObservationStateMismatch}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeDB}, RequireRuntime: true}},
 		},
 		ClaimPaymentLogError: {
 			ClaimType: ClaimPaymentLogError,
-			Required:  []FieldRequirement{{Field: "payment_log_error", ObservationKinds: []string{ObservationLogError}}},
+			Required:  []FieldRequirement{{Field: "payment_log_error", ObservationKinds: []string{ObservationLogError}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeLog}, RequireRuntime: true}},
 		},
 		ClaimPaymentStatusDistribution: {
-			ClaimType: ClaimPaymentStatusDistribution,
-			Required:  []FieldRequirement{{Field: "payment_status_distribution", ObservationKinds: []string{ObservationStatusDistribution}}},
+			ClaimType:              ClaimPaymentStatusDistribution,
+			Required:               []FieldRequirement{{Field: "payment_status_distribution", ObservationKinds: []string{ObservationStatusDistribution}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true}},
+			RequiresCompleteResult: true,
 		},
 		ClaimCallbackTimeoutRelated: {
 			ClaimType: ClaimCallbackTimeoutRelated,
 			Required: []FieldRequirement{
-				{Field: "payment_failure_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}},
-				{Field: "callback_timeout_log", ObservationKinds: []string{ObservationLogError}},
+				{Field: "payment_failure_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true},
+				{Field: "callback_timeout_log", ObservationKinds: []string{ObservationLogError}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeLog}, RequireRuntime: true},
 			},
 		},
 		ClaimCallbackTimeoutRootCause: {
 			ClaimType: ClaimCallbackTimeoutRootCause,
 			Required: []FieldRequirement{
-				{Field: "payment_failure_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}},
-				{Field: "callback_timeout_log", ObservationKinds: []string{ObservationLogError}},
+				{Field: "payment_failure_anomaly", ObservationKinds: []string{ObservationMetricAnomaly}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true},
+				{Field: "callback_timeout_log", ObservationKinds: []string{ObservationLogError}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeLog}, RequireRuntime: true},
+				{Field: "recovery_or_exclusion_evidence", ObservationKinds: []string{ObservationStatusDistribution, ObservationMetricValue}, AllowedSourceKinds: []EvidenceSourceKind{SourceRuntimeMetric}, RequireRuntime: true},
+			},
+			AlternativeRequired: []FieldRequirement{
 				{Field: "mechanism_or_runbook", ObservationKinds: []string{ObservationRunbookRule}},
-				{Field: "recovery_or_exclusion_evidence", ObservationKinds: []string{ObservationStatusDistribution, ObservationMetricValue}},
+				{
+					Field:               "mechanism_or_static_code",
+					ObservationKinds:    []string{ObservationStaticCodeDeclaration, ObservationStaticCodeCallSite},
+					AllowedSourceKinds:  []EvidenceSourceKind{SourceStaticCode},
+					RequireVersionMatch: true,
+				},
 			},
 		},
 	}
@@ -156,31 +210,12 @@ func IsPaymentClaimType(claimType string) bool {
 	return ok
 }
 
-func ShouldUsePaymentClaimRules(claims []CandidateClaim, evidenceItems []EvidenceItem, failedQueries []FailedQuery) bool {
-	for _, claim := range claims {
-		if IsPaymentClaimType(claim.ClaimType) || subjectHasPaymentSignal(claim.Subject) || fieldsHavePaymentSignal(claim.Fields) {
-			return true
-		}
-	}
-	for _, item := range evidenceItems {
-		if toolNameHasPaymentSignal(item.ToolName) || subjectHasPaymentSignal(item.Subject) {
-			return true
-		}
-		for _, obs := range item.Observations {
-			if subjectHasPaymentSignal(obs.Subject) || fieldsHavePaymentSignal(obs.Fields) {
-				return true
-			}
-		}
-	}
-	for _, query := range failedQueries {
-		if toolNameHasPaymentSignal(query.ToolName) || textHasPaymentSignal(query.Summary) {
-			return true
-		}
-	}
-	return false
+func (r *ClaimRuleRegistry) Match(claim CandidateClaim, evidenceItems []EvidenceItem, failedQueries []FailedQuery) CoverageReport {
+	report := r.matchEvidence(claim, evidenceItems, failedQueries)
+	return applyAssertionDisposition(report)
 }
 
-func (r *ClaimRuleRegistry) Match(claim CandidateClaim, evidenceItems []EvidenceItem, failedQueries []FailedQuery) CoverageReport {
+func (r *ClaimRuleRegistry) matchEvidence(claim CandidateClaim, evidenceItems []EvidenceItem, failedQueries []FailedQuery) CoverageReport {
 	rule, ok := r.rules[strings.TrimSpace(claim.ClaimType)]
 	report := CoverageReport{
 		Claim:    claim,
@@ -192,17 +227,42 @@ func (r *ClaimRuleRegistry) Match(claim CandidateClaim, evidenceItems []Evidence
 		return report
 	}
 
-	related := relatedEvidence(claim, evidenceItems)
+	referenced, missingEvidenceIDs := referencedEvidence(claim, evidenceItems)
+	referencedFailedQueryIDs, missingFailedQueryIDs := referencedFailedQueries(claim, failedQueries)
+	related := relatedEvidence(claim, referenced)
 	report.RelatedEvidenceIDs = evidenceIDs(related)
+	report.FailedQueryIDs = referencedFailedQueryIDs
+	if len(missingEvidenceIDs) > 0 {
+		report.MissingFields = append(report.MissingFields, FieldRequirement{Field: "referenced_evidence"})
+	}
+	if len(missingFailedQueryIDs) > 0 {
+		report.MissingFields = append(report.MissingFields, FieldRequirement{Field: "referenced_failed_query"})
+	}
+	if len(claim.EvidenceIDs) == 0 && len(claim.FailedQueryIDs) == 0 {
+		report.MissingFields = append(report.MissingFields, FieldRequirement{Field: "evidence_reference"})
+	}
 	if len(related) == 0 {
-		report.FailedQueryIDs = failedQueryIDs(failedQueries)
-		if len(report.FailedQueryIDs) > 0 {
+		if len(report.FailedQueryIDs) > 0 && len(missingEvidenceIDs) == 0 {
 			report.Status = CoverageUnknown
 		} else {
 			report.Status = CoverageUncovered
 		}
-		report.MissingFields = append(report.MissingFields, rule.Required...)
+		if len(report.MissingFields) == 0 {
+			report.MissingFields = append(report.MissingFields, rule.Required...)
+		}
 		return report
+	}
+	if expired := expiredEvidenceIDs(related); len(expired) > 0 {
+		report.Status = CoverageStale
+		report.MissingFields = append(report.MissingFields, FieldRequirement{Field: "fresh_runtime_evidence"})
+		return report
+	}
+	claimFieldMatches, claimFieldMissing, claimFieldConflicts := matchClaimFields(claim, related)
+	report.MatchedFields = append(report.MatchedFields, claimFieldMatches...)
+	report.MissingFields = append(report.MissingFields, claimFieldMissing...)
+	report.ConflictFields = append(report.ConflictFields, claimFieldConflicts...)
+	for _, match := range claimFieldMatches {
+		report.MatchedEvidenceIDs = appendUnique(report.MatchedEvidenceIDs, match.EvidenceID)
 	}
 
 	for _, req := range rule.Required {
@@ -214,18 +274,199 @@ func (r *ClaimRuleRegistry) Match(claim CandidateClaim, evidenceItems []Evidence
 			report.MissingFields = append(report.MissingFields, req)
 		}
 	}
+	if len(rule.AlternativeRequired) > 0 {
+		match, ok := findRequirementMatchFromAlternatives(rule.AlternativeRequired, related)
+		if ok {
+			report.MatchedFields = append(report.MatchedFields, match)
+			report.MatchedEvidenceIDs = appendUnique(report.MatchedEvidenceIDs, match.EvidenceID)
+		} else {
+			report.MissingFields = append(report.MissingFields, FieldRequirement{Field: "mechanism_or_runbook_or_aligned_code"})
+		}
+	}
+	if len(missingEvidenceIDs) > 0 || len(missingFailedQueryIDs) > 0 {
+		report.Status = CoveragePartial
+		return report
+	}
 
-	report.ConflictFields = findConflicts(rule.ConflictChecks, claim, related)
+	report.ConflictFields = append(report.ConflictFields, findConflicts(rule.ConflictChecks, claim, related)...)
 	if len(report.ConflictFields) > 0 {
 		report.Status = CoverageConflict
 		return report
 	}
 	if len(report.MissingFields) == 0 {
+		if rule.RequiresCompleteResult && hasPartialEvidence(related) {
+			report.Status = CoveragePartial
+			return report
+		}
 		report.Status = CoverageCovered
 		return report
 	}
 	report.Status = CoveragePartial
 	return report
+}
+
+func hasPartialEvidence(items []EvidenceItem) bool {
+	for _, item := range items {
+		if item.ResultMetadata.Truncated || item.ResultMetadata.ReturnedRows < item.ResultMetadata.MaxRows && item.ResultMetadata.MaxRows > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func applyAssertionDisposition(report CoverageReport) CoverageReport {
+	assertion := strings.TrimSpace(report.Claim.AssertionKind)
+	if assertion == "" || assertion == AssertionFact {
+		return report
+	}
+
+	switch assertion {
+	case AssertionHypothesis:
+		switch report.Status {
+		case CoverageCovered:
+			report.Status = CoverageSupported
+		case CoveragePartial, CoverageUncovered, CoverageStale:
+			report.Status = CoverageUnknown
+		case CoverageConflict:
+			report.Status = CoverageRefuted
+		}
+	case AssertionImplementation:
+		if report.Status == CoverageCovered {
+			report.Status = CoverageStaticallySupported
+		} else if report.Status == CoveragePartial || report.Status == CoverageUncovered {
+			report.Status = CoverageUnknown
+		}
+	case AssertionNextCheck:
+		report.Status = CoverageActionOnly
+	}
+	return report
+}
+
+func matchClaimFields(claim CandidateClaim, evidenceItems []EvidenceItem) ([]FieldMatch, []FieldRequirement, []FieldConflict) {
+	if len(claim.Fields) == 0 {
+		return nil, nil, nil
+	}
+
+	keys := make([]string, 0, len(claim.Fields))
+	for key := range claim.Fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var matches []FieldMatch
+	var missing []FieldRequirement
+	var conflicts []FieldConflict
+	for _, key := range keys {
+		expected := strings.TrimSpace(toString(claim.Fields[key]))
+		if expected == "" {
+			continue
+		}
+		found := false
+		matched := false
+		for _, item := range evidenceItems {
+			for _, observation := range item.Observations {
+				actual, present := observationFieldValue(item, observation, key)
+				if !present {
+					continue
+				}
+				found = true
+				if strings.EqualFold(expected, actual) {
+					matched = true
+					matches = append(matches, FieldMatch{
+						Field:            "claim_field:" + key,
+						EvidenceID:       item.EvidenceID,
+						ToolName:         item.ToolName,
+						SourceKind:       item.SourceKind,
+						Revision:         item.Revision,
+						VersionAlignment: item.VersionAlignment,
+						RuntimeVerified:  item.RuntimeVerified,
+						Summary:          observation.Summary,
+					})
+					continue
+				}
+				conflicts = append(conflicts, FieldConflict{
+					Field:      key,
+					EvidenceID: item.EvidenceID,
+					Expected:   expected,
+					Actual:     actual,
+				})
+			}
+		}
+		if !found || !matched {
+			missing = append(missing, FieldRequirement{Field: "claim_field:" + key, ClaimField: key})
+		}
+	}
+	return matches, missing, conflicts
+}
+
+func observationFieldValue(item EvidenceItem, observation Observation, key string) (string, bool) {
+	if value, ok := observation.Fields[key]; ok {
+		return strings.TrimSpace(toString(value)), true
+	}
+	if value, ok := observation.Subject.Fields[key]; ok {
+		return strings.TrimSpace(value), true
+	}
+	if value, ok := observation.Scope.Fields[key]; ok {
+		return strings.TrimSpace(value), true
+	}
+	if value, ok := item.Subject.Fields[key]; ok {
+		return strings.TrimSpace(value), true
+	}
+	if value, ok := item.Scope.Fields[key]; ok {
+		return strings.TrimSpace(value), true
+	}
+	return "", false
+}
+
+func referencedEvidence(claim CandidateClaim, evidenceItems []EvidenceItem) ([]EvidenceItem, []string) {
+	if len(claim.EvidenceIDs) == 0 {
+		return nil, nil
+	}
+
+	byID := make(map[string]EvidenceItem, len(evidenceItems))
+	for _, item := range evidenceItems {
+		if strings.TrimSpace(item.EvidenceID) != "" {
+			byID[item.EvidenceID] = item
+		}
+	}
+
+	var referenced []EvidenceItem
+	var missing []string
+	for _, evidenceID := range claim.EvidenceIDs {
+		evidenceID = strings.TrimSpace(evidenceID)
+		item, ok := byID[evidenceID]
+		if !ok {
+			missing = appendUnique(missing, evidenceID)
+			continue
+		}
+		referenced = append(referenced, item)
+	}
+	return referenced, missing
+}
+
+func referencedFailedQueries(claim CandidateClaim, failedQueries []FailedQuery) ([]string, []string) {
+	if len(claim.FailedQueryIDs) == 0 {
+		return nil, nil
+	}
+
+	byID := make(map[string]bool, len(failedQueries))
+	for _, query := range failedQueries {
+		if strings.TrimSpace(query.FailedQueryID) != "" {
+			byID[query.FailedQueryID] = true
+		}
+	}
+
+	var referenced []string
+	var missing []string
+	for _, failedQueryID := range claim.FailedQueryIDs {
+		failedQueryID = strings.TrimSpace(failedQueryID)
+		if byID[failedQueryID] {
+			referenced = appendUnique(referenced, failedQueryID)
+			continue
+		}
+		missing = appendUnique(missing, failedQueryID)
+	}
+	return referenced, missing
 }
 
 func relatedEvidence(claim CandidateClaim, evidenceItems []EvidenceItem) []EvidenceItem {
@@ -235,10 +476,12 @@ func relatedEvidence(claim CandidateClaim, evidenceItems []EvidenceItem) []Evide
 			continue
 		}
 		if isCrossSubjectPaymentClaim(claim.ClaimType) {
-			out = append(out, item)
+			if scopeRelated(claim.Scope, item) {
+				out = append(out, item)
+			}
 			continue
 		}
-		if subjectRelated(claim.Subject, item.Subject) || observationsRelated(claim.Subject, item.Observations) || claim.Subject.Service == "" {
+		if scopeRelated(claim.Scope, item) && (subjectRelated(claim.Subject, item.Subject) || observationsRelated(claim.Subject, item.Observations) || claim.Subject.Service == "") {
 			out = append(out, item)
 		}
 	}
@@ -271,15 +514,118 @@ func subjectRelated(claimSubject SubjectRef, evidenceSubject SubjectRef) bool {
 	return true
 }
 
+func scopeRelated(claimScope EvidenceScope, item EvidenceItem) bool {
+	if claimScope.TimeRange != "" {
+		if actual, ok := evidenceScopeValue(item, "time_range"); ok && !strings.EqualFold(claimScope.TimeRange, actual) {
+			return false
+		}
+	}
+	if claimScope.StartTime != "" {
+		if actual, ok := evidenceScopeValue(item, "start_time"); ok && !strings.EqualFold(claimScope.StartTime, actual) {
+			return false
+		}
+	}
+	if claimScope.EndTime != "" {
+		if actual, ok := evidenceScopeValue(item, "end_time"); ok && !strings.EqualFold(claimScope.EndTime, actual) {
+			return false
+		}
+	}
+	for key, expected := range claimScope.Fields {
+		actual, ok := evidenceScopeValue(item, key)
+		if !ok || !strings.EqualFold(expected, actual) {
+			return false
+		}
+	}
+	return true
+}
+
+func evidenceScopeValue(item EvidenceItem, key string) (string, bool) {
+	if value, ok := item.Scope.Fields[key]; ok {
+		return strings.TrimSpace(value), true
+	}
+	for _, observation := range item.Observations {
+		if value, ok := observation.Scope.Fields[key]; ok {
+			return strings.TrimSpace(value), true
+		}
+	}
+	switch key {
+	case "time_range":
+		return item.Scope.TimeRange, item.Scope.TimeRange != ""
+	case "start_time":
+		return item.Scope.StartTime, item.Scope.StartTime != ""
+	case "end_time":
+		return item.Scope.EndTime, item.Scope.EndTime != ""
+	default:
+		return "", false
+	}
+}
+
 func findRequirementMatch(req FieldRequirement, evidenceItems []EvidenceItem) (FieldMatch, bool) {
 	for _, item := range evidenceItems {
 		for _, obs := range item.Observations {
-			if kindAllowed(obs.Kind, req.ObservationKinds) {
-				return FieldMatch{Field: req.Field, EvidenceID: item.EvidenceID, ToolName: item.ToolName, Summary: obs.Summary}, true
+			if kindAllowed(obs.Kind, req.ObservationKinds) && sourceAllowed(item, req) {
+				return FieldMatch{
+					Field:            req.Field,
+					EvidenceID:       item.EvidenceID,
+					ToolName:         item.ToolName,
+					SourceKind:       item.SourceKind,
+					Revision:         item.Revision,
+					VersionAlignment: item.VersionAlignment,
+					RuntimeVerified:  item.RuntimeVerified,
+					Summary:          obs.Summary,
+				}, true
 			}
 		}
 	}
 	return FieldMatch{}, false
+}
+
+func findRequirementMatchFromAlternatives(requirements []FieldRequirement, evidenceItems []EvidenceItem) (FieldMatch, bool) {
+	for _, requirement := range requirements {
+		if match, ok := findRequirementMatch(requirement, evidenceItems); ok {
+			return match, true
+		}
+	}
+	return FieldMatch{}, false
+}
+
+func sourceAllowed(item EvidenceItem, requirement FieldRequirement) bool {
+	if (item.SourceKind == SourceStaticCode || item.SourceKind == SourceStaticConfig) && len(requirement.AllowedSourceKinds) == 0 {
+		return false
+	}
+	if len(requirement.AllowedSourceKinds) > 0 {
+		allowed := false
+		for _, kind := range requirement.AllowedSourceKinds {
+			if item.SourceKind == kind {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	if requirement.RequireRuntime && !item.RuntimeVerified {
+		return false
+	}
+	if requirement.RequireRuntime && item.ObservedAt.IsZero() {
+		return false
+	}
+	if requirement.RequireVersionMatch && item.VersionAlignment != VersionAligned {
+		return false
+	}
+	return true
+}
+
+func expiredEvidenceIDs(items []EvidenceItem) []string {
+	now := time.Now().UTC()
+	ids := make([]string, 0)
+	for _, item := range items {
+		if IsExpired(item, now) {
+			ids = append(ids, item.EvidenceID)
+		}
+	}
+	return ids
 }
 
 func kindAllowed(kind string, allowed []string) bool {
@@ -321,14 +667,6 @@ func evidenceIDs(items []EvidenceItem) []string {
 	return ids
 }
 
-func failedQueryIDs(items []FailedQuery) []string {
-	var ids []string
-	for _, item := range items {
-		ids = appendUnique(ids, item.FailedQueryID)
-	}
-	return ids
-}
-
 func appendUnique(values []string, value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -350,63 +688,4 @@ func toString(v any) string {
 		return s
 	}
 	return strings.TrimSpace(fmt.Sprint(v))
-}
-
-func subjectHasPaymentSignal(subject SubjectRef) bool {
-	return textHasPaymentSignal(subject.Type) ||
-		textHasPaymentSignal(subject.Service) ||
-		strings.TrimSpace(subject.OrderNo) != "" ||
-		mapStringHasPaymentSignal(subject.Fields)
-}
-
-func fieldsHavePaymentSignal(fields map[string]any) bool {
-	for key, value := range fields {
-		if textHasPaymentSignal(key) || textHasPaymentSignal(toString(value)) {
-			return true
-		}
-	}
-	return false
-}
-
-func mapStringHasPaymentSignal(fields map[string]string) bool {
-	for key, value := range fields {
-		if textHasPaymentSignal(key) || textHasPaymentSignal(value) {
-			return true
-		}
-	}
-	return false
-}
-
-func toolNameHasPaymentSignal(toolName string) bool {
-	return textHasPaymentSignal(toolName)
-}
-
-func textHasPaymentSignal(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "" {
-		return false
-	}
-	markers := []string{
-		"payment",
-		"refund",
-		"callback",
-		"notify",
-		"payment_order",
-		"payment order",
-		"order_no",
-		"order no",
-		"order id",
-		"支付",
-		"退款",
-		"回调",
-		"通知",
-		"订单号",
-		"支付订单",
-	}
-	for _, marker := range markers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
 }

@@ -16,13 +16,13 @@ type Store interface {
 	SaveIncident(context.Context, Incident) error
 }
 
-type MySQLStore struct{}
+type SQLiteStore struct{}
 
-func NewMySQLStore() *MySQLStore {
-	return &MySQLStore{}
+func NewSQLiteStore() *SQLiteStore {
+	return &SQLiteStore{}
 }
 
-func (s *MySQLStore) LoadState(ctx context.Context, stateKey string) (DetectorState, error) {
+func (s *SQLiteStore) LoadState(ctx context.Context, stateKey string) (DetectorState, error) {
 	var state DetectorState
 	err := g.DB().Model("detector_states").
 		Ctx(ctx).
@@ -52,7 +52,7 @@ func (s *MySQLStore) LoadState(ctx context.Context, stateKey string) (DetectorSt
 	return state, nil
 }
 
-func (s *MySQLStore) SaveState(ctx context.Context, state DetectorState) error {
+func (s *SQLiteStore) SaveState(ctx context.Context, state DetectorState) error {
 	data := g.Map{
 		"state_key":             state.StateKey,
 		"rule_id":               state.RuleID,
@@ -78,7 +78,7 @@ func (s *MySQLStore) SaveState(ctx context.Context, state DetectorState) error {
 	return nil
 }
 
-func (s *MySQLStore) SaveIncident(ctx context.Context, incident Incident) error {
+func (s *SQLiteStore) SaveIncident(ctx context.Context, incident Incident) error {
 	data := g.Map{
 		"id":            incident.ID,
 		"fingerprint":   incident.Fingerprint,

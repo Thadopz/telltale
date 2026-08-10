@@ -30,13 +30,16 @@ embedding_model:
   endpoint: "YOUR_MULTIMODAL_EMBEDDING_ENDPOINT"
   dimension: 1152
 
-milvus:
-  address: "YOUR_MILVUS_ADDRESS"
-  db_name: "agent"
-  collection: "biz_hybrid_v1"
-  dense_dimension: 1152
-  bm25_analyzer: "standard"
+database:
+  default_target: ""
+  targets: {}
 
-file_dir: "YOUR_KNOWLEDGE_DOCS_DIR"
+storage:
+  sqlite_path: "data/telltale.db"
 
-mcp_url: "https://YOUR_MCP_HOST/mcp"
+identity:
+  user_id: "local-user"
+  tenant_id: "local"
+  roles: ["oncall"]
+
+file_dir: "data/docs"

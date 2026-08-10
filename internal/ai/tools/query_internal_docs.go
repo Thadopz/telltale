@@ -1,9 +1,9 @@
 package tools
 
 import (
-	"SREagent/internal/ai/knowledge"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/knowledge"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"

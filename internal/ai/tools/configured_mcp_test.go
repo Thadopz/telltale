@@ -1,12 +1,13 @@
 package tools
 
 import (
-	"SREagent/internal/ai/evidence"
-	"SREagent/internal/authz"
 	"context"
 	"errors"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/authz"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -23,6 +24,26 @@ func (t configuredMCPTestTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (t configuredMCPTestTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
 	return `{"result":"ok"}`, nil
+}
+
+type configuredMCPStructuredTestTool struct{}
+
+func (configuredMCPStructuredTestTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "structured_evidence", Desc: "configured MCP structured evidence test tool"}, nil
+}
+
+func (configuredMCPStructuredTestTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	return `{"content":[{"type":"text","text":"{\"success\":true,\"status\":\"success\",\"evidence_id\":\"ev_nested_1\",\"can_use_as_evidence\":true,\"data_status\":\"present\",\"source_kind\":\"runtime_log\",\"runtime_verified\":true,\"observations\":[{\"kind\":\"log_error\",\"summary\":\"runtime error\"}],\"summary\":\"structured MCP evidence\"}"}]}`, nil
+}
+
+type configuredMCPFailingTool struct{}
+
+func (configuredMCPFailingTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "failing_remote_query", Desc: "configured MCP failure test tool"}, nil
+}
+
+func (configuredMCPFailingTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	return "", errors.New("remote dependency unavailable")
 }
 
 func TestLoadConfiguredMCPServersGroupsAndNamespacesTools(t *testing.T) {
@@ -63,13 +84,88 @@ func TestLoadConfiguredMCPServersGroupsAndNamespacesTools(t *testing.T) {
 	}
 
 	invokable := toolsByDomain[DomainPayment][0].(tool.InvokableTool)
-	output, err := invokable.InvokableRun(ctx, `{"order_id":"P-1"}`)
+	paymentCtx := mcpAgentContext(ctx, authz.AgentScopePayment)
+	output, err := invokable.InvokableRun(paymentCtx, `{"order_id":"P-1"}`)
 	if err != nil {
 		t.Fatalf("invoke configured MCP tool: %v", err)
 	}
 	parsed := evidence.Parse(output).Envelope
 	if !parsed.CanUseAsEvidence || len(parsed.Observations) != 1 || parsed.Observations[0].Kind != evidence.ObservationMCPToolResult {
 		t.Fatalf("expected MCP evidence envelope, got %s", output)
+	}
+}
+
+func TestConfiguredMCPToolPreservesStructuredEvidenceEnvelope(t *testing.T) {
+	ctx := authz.WithPrincipal(context.Background(), authz.Principal{UserID: "ops", Roles: []string{"oncall"}})
+	config := MCPServerConfig{
+		Name:       "structured-observer",
+		Domain:     DomainObservability,
+		URL:        "http://observability.example/mcp",
+		Permission: authz.PermMetricsRead,
+		Enabled:    true,
+		ReadOnly:   true,
+	}
+	toolsByDomain, err := loadConfiguredMCPServers(ctx, []MCPServerConfig{config}, func(context.Context, MCPServerConfig, map[string]string) ([]tool.BaseTool, error) {
+		return []tool.BaseTool{configuredMCPStructuredTestTool{}}, nil
+	})
+	if err != nil {
+		t.Fatalf("load configured MCP server: %v", err)
+	}
+	invokable := toolsByDomain[DomainObservability][0].(tool.InvokableTool)
+	observabilityCtx := mcpAgentContext(ctx, authz.AgentScopeObservability)
+	output, err := invokable.InvokableRun(observabilityCtx, `{}`)
+	if err != nil {
+		t.Fatalf("invoke structured MCP tool: %v", err)
+	}
+	parsed := evidence.Parse(output).Envelope
+	if parsed.EvidenceID == "ev_nested_1" || parsed.SourceKind != evidence.SourceRuntimeLog || parsed.RuntimeVerified {
+		t.Fatalf("structured MCP metadata was not reissued safely: %s", output)
+	}
+	if parsed.TrustLevel != evidence.ContentTrustUntrustedExternal || parsed.VersionAlignment != evidence.VersionUnknown {
+		t.Fatalf("structured MCP result must remain untrusted and unaligned: %s", output)
+	}
+	if len(parsed.Observations) != 2 || parsed.Observations[0].Kind != evidence.ObservationLogError {
+		t.Fatalf("structured and generic observations were not merged: %s", output)
+	}
+}
+
+func TestConfiguredMCPToolOpensCircuitAfterRepeatedFailures(t *testing.T) {
+	serverName := "circuit-test-" + strings.ReplaceAll(t.Name(), "/", "-")
+	configuredMCPCircuits.Lock()
+	delete(configuredMCPCircuits.entries, serverName)
+	configuredMCPCircuits.Unlock()
+	defer func() {
+		configuredMCPCircuits.Lock()
+		delete(configuredMCPCircuits.entries, serverName)
+		configuredMCPCircuits.Unlock()
+	}()
+
+	wrapped := &configuredMCPTool{
+		inner:          configuredMCPFailingTool{},
+		info:           &schema.ToolInfo{Name: "circuit_query"},
+		serverName:     serverName,
+		timeout:        time.Second,
+		maxOutputBytes: 1024,
+		circuitKey:     serverName,
+	}
+	ctx := authz.WithAgentScope(context.Background(), authz.AgentScopeObservability)
+	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapability(authz.AgentScopeObservability, time.Minute))
+
+	for attempt := 0; attempt < configuredMCPCircuitThreshold; attempt++ {
+		output, err := wrapped.InvokableRun(ctx, `{}`)
+		if err != nil {
+			t.Fatalf("unexpected MCP invocation error: %v", err)
+		}
+		if !strings.Contains(output, "remote dependency unavailable") {
+			t.Fatalf("expected remote failure on attempt %d, got %s", attempt+1, output)
+		}
+	}
+	output, err := wrapped.InvokableRun(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("unexpected open-circuit error: %v", err)
+	}
+	if !strings.Contains(output, "circuit is open") {
+		t.Fatalf("expected open-circuit response, got %s", output)
 	}
 }
 
@@ -191,4 +287,9 @@ func TestMCPServerConfigScansSnakeCaseFields(t *testing.T) {
 	if len(configs) != 1 || !configs[0].ReadOnly || configs[0].HeadersFromEnv["Authorization"] != "PAYMENT_MCP_TOKEN" {
 		t.Fatalf("unexpected scanned config: %#v", configs)
 	}
+}
+
+func mcpAgentContext(ctx context.Context, scope authz.AgentScope) context.Context {
+	ctx = authz.WithAgentScope(ctx, scope)
+	return authz.WithAgentCapability(ctx, authz.NewAgentCapability(scope, time.Minute))
 }

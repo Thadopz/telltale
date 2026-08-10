@@ -1,7 +1,7 @@
 package mem
 
 import (
-	"SREagent/internal/ai/models"
+	"github.com/Thadopz/telltale/internal/ai/models"
 	"context"
 	"encoding/json"
 	"fmt"

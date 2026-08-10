@@ -1,10 +1,10 @@
 package eval
 
 import (
-	"SREagent/internal/ai/models"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/models"
 	"strings"
 
 	"github.com/cloudwego/eino/schema"

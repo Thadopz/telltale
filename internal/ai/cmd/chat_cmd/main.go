@@ -1,9 +1,10 @@
 package main
 
 import (
-	"SREagent/internal/ai/agent/chat_pipeline"
-	"SREagent/internal/appconfig"
-	"SREagent/utility/mem"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline"
+	"github.com/Thadopz/telltale/internal/appconfig"
+	"github.com/Thadopz/telltale/utility/mem"
+	"github.com/Thadopz/telltale/utility/storage"
 	"context"
 	"fmt"
 
@@ -13,6 +14,12 @@ import (
 func main() {
 	ctx := context.Background()
 	appconfig.Configure(ctx)
+	if err := appconfig.ValidateRuntimeSecurity(ctx); err != nil {
+		panic(err)
+	}
+	if err := storage.Initialize(ctx); err != nil {
+		panic(err)
+	}
 	id := "111"
 	userMessage := &chat_pipeline.UserMessage{
 		ID:      id,

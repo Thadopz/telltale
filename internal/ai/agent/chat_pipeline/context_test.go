@@ -1,8 +1,8 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/authz"
 	"context"
+	"github.com/Thadopz/telltale/internal/authz"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,14 +62,48 @@ func TestAssembleModelContextAppliesContextBudget(t *testing.T) {
 	}
 
 	got := AssembleModelContext(context.Background(), input, time.Now())
-	if utf8.RuneCountInString(got.Summary) != SummaryMaxChars {
-		t.Fatalf("expected summary budget %d", SummaryMaxChars)
+	limits := layerCharacterLimits(context.Background())
+	if utf8.RuneCountInString(got.Summary) > limits["summary"] {
+		t.Fatalf("expected dynamic summary budget %d", limits["summary"])
 	}
-	if utf8.RuneCountInString(got.ToolResults) != ToolResultsMaxChars {
-		t.Fatalf("expected tool result budget %d", ToolResultsMaxChars)
+	if utf8.RuneCountInString(got.ToolResults) > limits["tool_results"] {
+		t.Fatalf("expected dynamic tool result budget %d", limits["tool_results"])
 	}
-	if utf8.RuneCountInString(got.DurableMemory) != DurableMemoryMaxChars {
-		t.Fatalf("expected durable memory budget %d", DurableMemoryMaxChars)
+	if utf8.RuneCountInString(got.DurableMemory) > limits["durable_memory"] {
+		t.Fatalf("expected dynamic durable memory budget %d", limits["durable_memory"])
+	}
+	if limits["summary"] <= SummaryMaxChars {
+		t.Fatalf("expected model-aware summary budget to exceed legacy cap, got %d", limits["summary"])
+	}
+}
+
+func TestBudgetModelContextSurvivesExtremelyCrowdedLayers(t *testing.T) {
+	modelContext := ModelContext{
+		Content:         "find the root cause of request req-42",
+		Summary:         strings.Repeat("old summary noise ", 600) + "evidence_id=ev_critical_1",
+		SessionState:    strings.Repeat("old state ", 300),
+		DurableMemory:   strings.Repeat("old memory ", 300),
+		ToolResults:     strings.Repeat("old tool result ", 500),
+		ProjectContext:  strings.Repeat("old project rule ", 800),
+		Skills:          strings.Repeat("old skill text ", 500),
+		RequestAnalysis: "diagnostic request",
+		History: []*schema.Message{
+			schema.UserMessage(strings.Repeat("old history ", 500)),
+			schema.AssistantMessage(strings.Repeat("old answer ", 500), nil),
+			schema.UserMessage("recent question"),
+			schema.AssistantMessage("recent answer", nil),
+		},
+	}
+
+	got := budgetModelContext(context.Background(), modelContext)
+	if estimateModelContextTokens(got) > DefaultModelContextMaxTokens {
+		t.Fatalf("expected aggregate context budget, got %d tokens", estimateModelContextTokens(got))
+	}
+	if got.Content != modelContext.Content || got.RequestAnalysis != modelContext.RequestAnalysis {
+		t.Fatalf("expected current request fields to remain exact, got content=%q analysis=%q", got.Content, got.RequestAnalysis)
+	}
+	if !strings.Contains(got.Summary, "ev_critical_1") {
+		t.Fatalf("expected exact detail at the tail of the summary, got %q", got.Summary)
 	}
 }
 

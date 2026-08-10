@@ -2,8 +2,10 @@ package appconfig
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/os/gcfg"
@@ -22,10 +24,30 @@ type configSelection struct {
 	fileFound bool
 }
 
+type quietConfigLogKey struct{}
+
+// WithQuietConfigLogging is used by machine-readable CLI commands so config
+// selection messages cannot corrupt JSON on stdout.
+func WithQuietConfigLogging(ctx context.Context) context.Context {
+	return context.WithValue(ctx, quietConfigLogKey{}, true)
+}
+
+func quietConfigLogging(ctx context.Context) bool {
+	value, _ := ctx.Value(quietConfigLogKey{}).(bool)
+	return value
+}
+
 // Configure selects config.local.yaml when it exists and otherwise uses config.yaml.
 // Call it once at the start of every executable, before reading any configuration.
 func Configure(ctx context.Context) {
-	selection := selectConfigFile(".")
+	ConfigureAt(ctx, ".")
+}
+
+// ConfigureAt selects configuration from a project root or directly from a
+// config directory. This keeps the normal manifest/config layout while
+// allowing CLI users to point at an explicit configuration directory.
+func ConfigureAt(ctx context.Context, root string) {
+	selection := selectConfigFile(root)
 	adapter, ok := g.Cfg().GetAdapter().(*gcfg.AdapterFile)
 	if !ok {
 		g.Log().Warning(ctx, "skip app config selection: config adapter is not file-based")
@@ -39,9 +61,36 @@ func Configure(ctx context.Context) {
 
 	adapter.SetFileName(selection.fileName)
 	adapter.Clear()
-	if selection.isLocal {
+	if selection.isLocal && !quietConfigLogging(ctx) {
 		g.Log().Infof(ctx, "using local config file: %s", filepath.Join(selection.dir, selection.fileName))
 	}
+}
+
+// ValidateRuntimeSecurity prevents a standalone production process from
+// silently running with fail-open authorization. Tests and evals may disable
+// permissions explicitly because they inject their own fake authorization
+// context.
+func ValidateRuntimeSecurity(ctx context.Context) error {
+	enabled := true
+	if value, err := g.Cfg().Get(ctx, "permissions.enabled"); err == nil && value != nil {
+		enabled = value.Bool()
+	}
+	environment := "standalone"
+	if value, err := g.Cfg().Get(ctx, "runtime.environment"); err == nil && value != nil {
+		environment = strings.ToLower(strings.TrimSpace(value.String()))
+	}
+	return validateRuntimeSecurity(enabled, environment)
+}
+
+func validateRuntimeSecurity(enabled bool, environment string) error {
+	if enabled {
+		return nil
+	}
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	if environment != "test" && environment != "eval" {
+		return fmt.Errorf("permissions.enabled=false is only allowed in test or eval environments")
+	}
+	return nil
 }
 
 func selectConfigFile(root string) configSelection {
@@ -49,7 +98,10 @@ func selectConfigFile(root string) configSelection {
 		root = "."
 	}
 
-	dir := filepath.Join(root, filepath.FromSlash(configDir))
+	dir := root
+	if !regularFileExists(filepath.Join(dir, localConfig)) && !regularFileExists(filepath.Join(dir, defaultConfig)) {
+		dir = filepath.Join(root, filepath.FromSlash(configDir))
+	}
 	localPath := filepath.Join(dir, localConfig)
 	if regularFileExists(localPath) {
 		return configSelection{

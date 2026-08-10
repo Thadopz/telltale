@@ -23,11 +23,12 @@ const (
 
 var SimpleMemoryMap = make(map[string]*SimpleMemory)
 var mu sync.Mutex
-var store memoryStore = newMySQLMemoryStore()
+var store memoryStore = newSQLiteMemoryStore()
 
 type ContextPolicy struct {
 	MaxMessages int
 	MaxChars    int
+	MaxTokens   int
 }
 
 type memoryScope struct {
@@ -40,6 +41,7 @@ func DefaultContextPolicy() ContextPolicy {
 	return ContextPolicy{
 		MaxMessages: defaultContextMaxMessage,
 		MaxChars:    defaultContextMaxChars,
+		MaxTokens:   3000,
 	}
 }
 
@@ -67,14 +69,18 @@ func GetConversationMemory(userID string, conversationID string) *SimpleMemory {
 }
 
 type SimpleMemory struct {
-	ID            string            `json:"id"`
-	UserID        string            `json:"user_id"`
-	Messages      []*schema.Message `json:"messages"`
-	Summary       string            `json:"summary"`
-	MaxWindowSize int
-	UpdatedAt     time.Time
-	mu            sync.Mutex
-	store         memoryStore
+	ID                string             `json:"id"`
+	UserID            string             `json:"user_id"`
+	Messages          []*schema.Message  `json:"messages"`
+	Summary           string             `json:"summary"`
+	Facts             []ContextFact      `json:"facts,omitempty"`
+	Compaction        CompactionMetadata `json:"compaction,omitempty"`
+	MaxWindowSize     int
+	UpdatedAt         time.Time
+	Policy            CompactionPolicy `json:"-"`
+	compactionPending bool
+	mu                sync.Mutex
+	store             memoryStore
 }
 
 func (c *SimpleMemory) SetMessages(msg *schema.Message) {
@@ -83,7 +89,7 @@ func (c *SimpleMemory) SetMessages(msg *schema.Message) {
 
 	c.Messages = append(c.Messages, msg)
 	c.UpdatedAt = time.Now()
-	c.trimStoredMessages()
+	c.compactLocked()
 	c.persistLocked(msg)
 }
 
@@ -134,45 +140,7 @@ func (c *SimpleMemory) GetContextMessages(policy ContextPolicy) []*schema.Messag
 		return []*schema.Message{}
 	}
 
-	return cloneMessages(c.Messages[start:])
-}
-
-func (c *SimpleMemory) trimStoredMessages() {
-	maxWindowSize := normalizeMaxMessages(c.MaxWindowSize)
-	if len(c.Messages) <= maxWindowSize {
-		return
-	}
-
-	excess := len(c.Messages) - maxWindowSize
-	if excess%2 != 0 {
-		excess++
-	}
-	if excess >= len(c.Messages) {
-		c.mergeSummary(c.Messages)
-		c.Messages = []*schema.Message{}
-		return
-	}
-
-	c.mergeSummary(c.Messages[:excess])
-	c.Messages = c.Messages[excess:]
-}
-
-func (c *SimpleMemory) mergeSummary(messages []*schema.Message) {
-	if len(messages) == 0 {
-		return
-	}
-
-	summaryPart := summarizeMessages(messages)
-	if summaryPart == "" {
-		return
-	}
-
-	if strings.TrimSpace(c.Summary) == "" {
-		c.Summary = summaryPart
-	} else {
-		c.Summary = c.Summary + "\n" + summaryPart
-	}
-	c.Summary = trimRunes(c.Summary, defaultSummaryMaxChars)
+	return budgetMessagesByTokens(cloneMessages(c.Messages[start:]), policy.MaxTokens)
 }
 
 func normalizeMaxMessages(maxMessages int) int {
@@ -243,6 +211,7 @@ func newSimpleMemory(userID string, id string, store memoryStore) *SimpleMemory 
 		Messages:      []*schema.Message{},
 		MaxWindowSize: defaultStoredWindowSize,
 		UpdatedAt:     time.Now(),
+		Policy:        ConfiguredCompactionPolicy(context.Background()),
 		store:         store,
 	}
 	if store == nil {
@@ -257,11 +226,13 @@ func newSimpleMemory(userID string, id string, store memoryStore) *SimpleMemory 
 	mem.Messages = cloneMessages(snapshot.Messages)
 	mem.UserID = normalizeScopeID(snapshot.UserID, userID)
 	mem.Summary = snapshot.Summary
+	mem.Facts = append([]ContextFact(nil), snapshot.Facts...)
+	mem.Compaction = snapshot.Compaction
 	mem.UpdatedAt = snapshot.UpdatedAt
 	if snapshot.MaxWindowSize > 0 {
 		mem.MaxWindowSize = snapshot.MaxWindowSize
 	}
-	mem.trimStoredMessages()
+	mem.compactLocked()
 	return mem
 }
 
@@ -274,17 +245,26 @@ func (c *SimpleMemory) persistLocked(msg *schema.Message) {
 		UserID:        c.UserID,
 		Messages:      cloneMessages(c.Messages),
 		Summary:       c.Summary,
+		Facts:         append([]ContextFact(nil), c.Facts...),
+		Compaction:    c.Compaction,
 		MaxWindowSize: c.MaxWindowSize,
 		UpdatedAt:     c.UpdatedAt,
 	}
+	snapshot.Compaction.Pending = c.compactionPending
 	if appender, ok := c.store.(appendMemoryStore); ok && msg != nil {
 		if err := appender.Append(snapshot, msg); err != nil {
 			logMemoryPersistError(c, msg, err)
+		} else {
+			c.compactionPending = false
+			c.Compaction.Pending = false
 		}
 		return
 	}
 	if err := c.store.Save(snapshot); err != nil {
 		logMemoryPersistError(c, msg, err)
+	} else {
+		c.compactionPending = false
+		c.Compaction.Pending = false
 	}
 }
 

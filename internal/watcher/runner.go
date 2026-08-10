@@ -1,7 +1,7 @@
 package watcher
 
 import (
-	"SREagent/internal/observability"
+	"github.com/Thadopz/telltale/internal/observability"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"

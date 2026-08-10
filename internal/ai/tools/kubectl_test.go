@@ -31,7 +31,6 @@ func TestKubectlCommandValidation(t *testing.T) {
 		"kubectl get pods -n astronomy-shop",
 		"kubectl describe deployment product-catalog -n astronomy-shop",
 		"kubectl logs deployment/product-catalog -n astronomy-shop",
-		"kubectl set image deployment/product-catalog product-catalog=good:v1 -n astronomy-shop",
 		"kubectl rollout status deployment/product-catalog -n astronomy-shop",
 	} {
 		args, err := splitCommandLine(cmd)

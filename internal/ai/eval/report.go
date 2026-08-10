@@ -26,10 +26,12 @@ func Summarize(mode Mode, results []EvalCaseResult) RunSummary {
 	totalRouteScore := 0.0
 	totalToolScore := 0.0
 	totalEvidenceScore := 0.0
+	totalClaimScore := 0.0
 	totalAnswerScore := 0.0
 	totalSafetyScore := 0.0
 	for _, result := range results {
-		caseAttempts[result.ID]++
+		caseKey := resultCaseKey(result)
+		caseAttempts[caseKey]++
 		if strings.Contains(strings.ToLower(result.Category), "safety") {
 			summary.SafetyAttempts++
 			if result.Scores.Pass {
@@ -38,7 +40,7 @@ func Summarize(mode Mode, results []EvalCaseResult) RunSummary {
 		}
 		if result.Scores.Pass {
 			summary.Passed++
-			casePasses[result.ID]++
+			casePasses[caseKey]++
 		} else {
 			summary.Failed++
 		}
@@ -51,6 +53,7 @@ func Summarize(mode Mode, results []EvalCaseResult) RunSummary {
 		totalRouteScore += result.Scores.RouteScore
 		totalToolScore += result.Scores.ToolScore
 		totalEvidenceScore += result.Scores.EvidenceScore
+		totalClaimScore += result.Scores.ClaimScore
 		totalAnswerScore += result.Scores.AnswerScore
 		totalSafetyScore += result.Scores.SafetyScore
 		for _, toolCall := range result.ToolCalls {
@@ -73,6 +76,7 @@ func Summarize(mode Mode, results []EvalCaseResult) RunSummary {
 		summary.AverageRouteScore = totalRouteScore / float64(summary.Total)
 		summary.AverageToolScore = totalToolScore / float64(summary.Total)
 		summary.AverageEvidenceScore = totalEvidenceScore / float64(summary.Total)
+		summary.AverageClaimScore = totalClaimScore / float64(summary.Total)
 		summary.AverageAnswerScore = totalAnswerScore / float64(summary.Total)
 		summary.AverageSafetyScore = totalSafetyScore / float64(summary.Total)
 	}
@@ -118,7 +122,16 @@ func applyQualityGate(summary *RunSummary, minimumPassRate float64) {
 		summary.RequiredPassRate = DefaultMinimumPassRate(summary.Mode)
 	}
 	summary.SafetyGatePass = summary.SafetyAttempts == summary.SafetyAttemptsPassed
-	summary.GatePass = summary.PassRate >= summary.RequiredPassRate && summary.SafetyGatePass
+	summary.VariantGatePass = true
+	if summary.Mode == ModeContextStress {
+		for _, passRate := range summary.CasePassRates {
+			if passRate < summary.RequiredPassRate {
+				summary.VariantGatePass = false
+				break
+			}
+		}
+	}
+	summary.GatePass = summary.PassRate >= summary.RequiredPassRate && summary.SafetyGatePass && summary.VariantGatePass
 }
 
 func writeJSONL(path string, results []EvalCaseResult) error {
@@ -151,14 +164,18 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 	fmt.Fprintf(&b, "- Required pass rate: %.2f%%\n", summary.RequiredPassRate*100)
 	fmt.Fprintf(&b, "- Quality gate: `%v`\n", summary.GatePass)
 	fmt.Fprintf(&b, "- Safety gate: `%v` (%d/%d)\n", summary.SafetyGatePass, summary.SafetyAttemptsPassed, summary.SafetyAttempts)
+	if summary.Mode == ModeContextStress {
+		fmt.Fprintf(&b, "- Variant gate: `%v`\n", summary.VariantGatePass)
+	}
 	fmt.Fprintf(&b, "- Knowledge used: %d\n\n", summary.KnowledgeUsed)
 	fmt.Fprintf(&b, "- Average model calls: %.2f\n", summary.AverageModelCalls)
 	fmt.Fprintf(&b, "- Average tool calls: %.2f\n\n", summary.AverageToolCalls)
 	fmt.Fprintf(&b, "- Average total tokens: %.2f\n\n", summary.AverageTotalTokens)
-	fmt.Fprintf(&b, "- Average scores: route=%.2f tool=%.2f evidence=%.2f answer=%.2f safety=%.2f\n\n",
+	fmt.Fprintf(&b, "- Average scores: route=%.2f tool=%.2f evidence=%.2f claim=%.2f answer=%.2f safety=%.2f\n\n",
 		summary.AverageRouteScore,
 		summary.AverageToolScore,
 		summary.AverageEvidenceScore,
+		summary.AverageClaimScore,
 		summary.AverageAnswerScore,
 		summary.AverageSafetyScore,
 	)
@@ -196,14 +213,18 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 			status = "FAIL"
 		}
 		fmt.Fprintf(&b, "### %s `%s`\n\n", status, result.ID)
+		if result.Variant != "" {
+			fmt.Fprintf(&b, "- Variant: `%s`\n", result.Variant)
+		}
 		fmt.Fprintf(&b, "- Category: `%s`\n", result.Category)
 		fmt.Fprintf(&b, "- Attempt: %d\n", result.Attempt)
 		fmt.Fprintf(&b, "- Knowledge: `%v`\n", result.Context.UseKnowledge)
 		fmt.Fprintf(&b, "- Tools: `%s`\n", strings.Join(toolNames(result.ToolCalls), ", "))
-		fmt.Fprintf(&b, "- Scores: route=%.0f tool=%.0f evidence=%.0f answer=%.0f safety=%.0f\n",
+		fmt.Fprintf(&b, "- Scores: route=%.0f tool=%.0f evidence=%.0f claim=%.0f answer=%.0f safety=%.0f\n",
 			result.Scores.RouteScore,
 			result.Scores.ToolScore,
 			result.Scores.EvidenceScore,
+			result.Scores.ClaimScore,
 			result.Scores.AnswerScore,
 			result.Scores.SafetyScore,
 		)
@@ -214,6 +235,22 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 			result.Metrics.ToolCalls,
 			result.Metrics.TotalTokens,
 		)
+		fmt.Fprintf(&b, "- Context budget: estimated=%d final=%d window=%d overhead=%d safety=%d trimmed=%s\n",
+			result.Context.EstimatedPromptTokens,
+			result.Context.FinalBudgetTokens,
+			result.Context.ContextWindowTokens,
+			result.Context.PromptOverheadTokens,
+			result.Context.SafetyMarginTokens,
+			strings.Join(result.Context.TrimmedLayers, ", "),
+		)
+		if result.Context.RegisteredToolCount > 0 {
+			fmt.Fprintf(&b, "- Context stress: registered_tools=%d critical_facts=%d/%d distractor_calls=%s\n",
+				result.Context.RegisteredToolCount,
+				len(result.Context.CriticalFactsSeen),
+				len(result.Context.CriticalFacts),
+				strings.Join(result.Context.DistractorToolCalls, ", "),
+			)
+		}
 		fmt.Fprintf(&b, "- Elapsed: %dms\n", result.ElapsedMS)
 		if result.Judge.Enabled {
 			fmt.Fprintf(&b, "- Judge: pass=%v score=%.2f tokens=%d reason=%s\n", result.Judge.Pass, result.Judge.Score, result.Judge.TotalTokens, result.Judge.Reason)
@@ -230,6 +267,13 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 		fmt.Fprintf(&b, "- Answer: %s\n\n", truncateText(result.Answer, 400))
 	}
 	return b.String()
+}
+
+func resultCaseKey(result EvalCaseResult) string {
+	if result.Variant == "" {
+		return result.ID
+	}
+	return result.ID + "/" + result.Variant
 }
 
 func toolNames(calls []ToolEvidence) []string {

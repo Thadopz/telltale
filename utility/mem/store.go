@@ -24,13 +24,19 @@ type appendMemoryStore interface {
 	Append(snapshot *memorySnapshot, msg *schema.Message) error
 }
 
+type contextFactsStore interface {
+	SaveContextFacts(snapshot *memorySnapshot) error
+}
+
 type memorySnapshot struct {
-	ID            string            `json:"id"`
-	UserID        string            `json:"user_id"`
-	Messages      []*schema.Message `json:"messages"`
-	Summary       string            `json:"summary"`
-	MaxWindowSize int               `json:"max_window_size"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	ID            string             `json:"id"`
+	UserID        string             `json:"user_id"`
+	Messages      []*schema.Message  `json:"messages"`
+	Summary       string             `json:"summary"`
+	Facts         []ContextFact      `json:"facts,omitempty"`
+	Compaction    CompactionMetadata `json:"compaction,omitempty"`
+	MaxWindowSize int                `json:"max_window_size"`
+	UpdatedAt     time.Time          `json:"updated_at"`
 }
 
 type fileMemoryStore struct {

@@ -1,9 +1,9 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/ai/models"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/models"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/gogf/gf/v2/frame/g"

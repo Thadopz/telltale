@@ -5,16 +5,26 @@
 package chat
 
 import (
-	"SREagent/api/chat"
-	"SREagent/internal/logic/sse"
+	"github.com/Thadopz/telltale/api/chat"
+	"github.com/Thadopz/telltale/internal/diagnosis"
+	"github.com/Thadopz/telltale/internal/logic/sse"
 )
 
 type ControllerV1 struct {
-	service *sse.Service
+	service    *sse.Service
+	diagnostic diagnosis.DiagnosticService
 }
 
 func NewV1() chat.IChatV1 {
+	return NewV1WithDiagnostic(diagnosis.NewService())
+}
+
+func NewV1WithDiagnostic(diagnosticService diagnosis.DiagnosticService) chat.IChatV1 {
+	if diagnosticService == nil {
+		diagnosticService = diagnosis.NewService()
+	}
 	return &ControllerV1{
-		service: sse.New(),
+		service:    sse.New(),
+		diagnostic: diagnosticService,
 	}
 }

@@ -1,8 +1,8 @@
 package watcher
 
 import (
-	"SREagent/internal/ai/evidence"
-	aitools "SREagent/internal/ai/tools"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	aitools "github.com/Thadopz/telltale/internal/ai/tools"
 	"context"
 	"encoding/json"
 	"fmt"

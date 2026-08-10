@@ -11,7 +11,7 @@ logger:
 
 observability:
   enabled: false
-  service_name: "sreagent"
+  service_name: "telltale"
   otlp_endpoint: "localhost:4317"
   insecure: true
   trace_sample_ratio: 1.0
@@ -25,32 +25,62 @@ agent:
     enabled: true
     min_tools: 8
 
+context:
+  # Optional legacy hard cap. Leave at zero to use the model-aware budget.
+  max_prompt_tokens: 0
+  working_prompt_cap_tokens: 131072
+  default_context_window_tokens: 32768
+  default_max_output_tokens: 8192
+  safety_margin_ratio: 0.10
+  min_safety_margin_tokens: 2048
+  prompt_overhead_tokens: 0
+  compaction:
+    # Zero derives the threshold from the usable model budget.
+    max_tokens: 0
+    trigger_ratio: 0.70
+    target_ratio: 0.55
+    min_recent_messages: 4
+    max_summary_chars: 6000
+    max_facts: 256
+
 database:
-  default:
-    type: "mysql"
-    host: "YOUR_DB_HOST"
-    port: "YOUR_DB_PORT"
-    user: "YOUR_DB_USER"
-    pass: "YOUR_DB_PASSWORD"
-    name: "YOUR_DB_NAME"
+  default_target: ""
+  targets: {}
+
+storage:
+  sqlite_path: "data/telltale.db"
+
+identity:
+  user_id: "local-user"
+  tenant_id: "local"
+  roles: ["oncall"]
+
+actions:
+  store: "memory"
 
 think_chat_model:
   description: "reasoning chat model for complex diagnosis"
   api_key: "YOUR_CHAT_API_KEY"
   base_url: "YOUR_CHAT_API_BASE_URL"
   model: "REASONING_CHAT_MODEL"
+  context_window_tokens: 1048576
+  max_output_tokens: 8192
 
 quick_chat_model:
   description: "fast chat model for low-latency responses"
   api_key: "YOUR_CHAT_API_KEY"
   base_url: "YOUR_CHAT_API_BASE_URL"
   model: "FAST_CHAT_MODEL"
+  context_window_tokens: 1048576
+  max_output_tokens: 8192
 
 failover_chat_model:
   description: "backup chat model used when the primary model is unavailable"
   api_key: "YOUR_FAILOVER_CHAT_API_KEY"
   base_url: "YOUR_FAILOVER_CHAT_API_BASE_URL"
   model: "FAILOVER_CHAT_MODEL"
+  context_window_tokens: 32768
+  max_output_tokens: 8192
 
 embedding_model:
   description: "multimodal embedding model for knowledge retrieval"
@@ -63,13 +93,6 @@ embedding_model:
 rerank:
   top_n: 3
   observe_log: true
-
-milvus:
-  address: "YOUR_MILVUS_ADDRESS"
-  db_name: "agent"
-  collection: "biz_hybrid_v1"
-  dense_dimension: 1152
-  bm25_analyzer: "standard"
 
 knowledge_retrieval:
   hybrid_candidates: 12
@@ -91,10 +114,6 @@ tools:
     allow_write: false
   prometheus:
     base_url: "http://127.0.0.1:9090"
-  mcp_log:
-    enabled: true
-    required: false
-    url: "https://YOUR_MCP_HOST/mcp"
 
 watch:
   enabled: false
@@ -118,7 +137,7 @@ permissions:
         - "tool:time.read"
         - "tool:metrics.read"
         - "tool:logs.read"
-        - "tool:mysql.read"
+        - "tool:database.read"
         - "tool:payment.read"
     admin:
       scopes:
@@ -126,10 +145,8 @@ permissions:
         - "tool:time.read"
         - "tool:metrics.read"
         - "tool:logs.read"
-        - "tool:mysql.read"
-        - "tool:mysql.write"
+        - "tool:database.read"
+        - "tool:database.write"
         - "tool:payment.read"
 
-file_dir: "YOUR_KNOWLEDGE_DOCS_DIR"
-
-mcp_url: "https://YOUR_MCP_HOST/mcp"
+file_dir: "data/docs"

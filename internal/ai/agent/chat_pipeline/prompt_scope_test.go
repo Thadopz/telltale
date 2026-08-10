@@ -11,8 +11,8 @@ func TestCoordinatorSystemPromptExcludesDomainToolInstructions(t *testing.T) {
 		"query_payment_anomaly",
 		"query_payment_metrics",
 		"query_payment_order_detail",
-		"mysql_slow_sql",
-		"performance_schema",
+		"db_slow_queries",
+		"db_server_health",
 		"query_internal_docs",
 	}
 	for _, name := range leafToolNames {
@@ -52,7 +52,7 @@ func TestDomainAgentInstructionsOwnLeafToolRules(t *testing.T) {
 		{
 			name:        "database",
 			instruction: databaseAgentInstruction,
-			want:        []string{"mysql_slow_sql", "performance_schema"},
+			want:        []string{"db_slow_queries", "configured database adapter"},
 		},
 		{
 			name:        "knowledge",

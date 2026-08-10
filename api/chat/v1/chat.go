@@ -37,15 +37,6 @@ type FileUploadRes struct {
 	FileSize int64  `json:"fileSize" dc:"文件大小(字节)"`
 }
 
-type AIOpsReq struct {
-	g.Meta `path:"/ai_ops" method:"post" summary:"AI运维"`
-}
-
-type AIOpsRes struct {
-	Result string   `json:"result"`
-	Detail []string `json:"detail"`
-}
-
 type ActionPrepareReq struct {
 	g.Meta        `path:"/actions/prepare" method:"post" summary:"Prepare high-risk action"`
 	UserId        string `json:"userId"`

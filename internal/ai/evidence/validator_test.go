@@ -13,32 +13,36 @@ func TestValidateAnswerRejectsUnknownEvidenceID(t *testing.T) {
 	}
 }
 
-func TestValidateAnswerRequiresGapForFailedQuery(t *testing.T) {
+func TestValidateAnswerOnlyChecksIdentifierReferences(t *testing.T) {
 	available := EvidenceSet{
 		EvidenceIDs:    map[string]bool{},
 		FailedQueryIDs: map[string]bool{"fq_1_abcd1234": true},
 	}
 	got := ValidateAnswer("the metric is normal", available)
-	if got.OK {
-		t.Fatalf("expected failed query gap rejection")
-	}
-	got = ValidateAnswer("metric 未验证 because fq_1_abcd1234 failed", available)
 	if !got.OK {
-		t.Fatalf("expected evidence gap answer to pass, got %#v", got)
+		t.Fatalf("natural language must not control validation, got %#v", got)
+	}
+	got = ValidateAnswer("the check failed: fq_1_abcd1234", available)
+	if !got.OK {
+		t.Fatalf("expected known failed query id to pass, got %#v", got)
+	}
+	got = ValidateAnswer("the check failed: fq_unknown", available)
+	if got.OK {
+		t.Fatalf("expected unknown failed query id rejection")
 	}
 }
 
-func TestValidateAnswerRequiresEvidenceForStrongDiagnosis(t *testing.T) {
+func TestValidateAnswerDoesNotUseDiagnosticKeywords(t *testing.T) {
 	available := EvidenceSet{
 		EvidenceIDs:    map[string]bool{"ev_1_abcd1234": true},
 		FailedQueryIDs: map[string]bool{},
 	}
-	got := ValidateAnswer("判断：Redis 延迟异常导致支付失败", available)
-	if got.OK {
-		t.Fatalf("expected strong diagnosis without evidence id to fail")
-	}
-	got = ValidateAnswer("判断：Redis 延迟异常 ev_1_abcd1234", available)
+	got := ValidateAnswer("diagnosis: Redis latency caused payment failure", available)
 	if !got.OK {
-		t.Fatalf("expected cited diagnosis to pass, got %#v", got)
+		t.Fatalf("diagnostic wording must not control validation, got %#v", got)
+	}
+	got = ValidateAnswer("diagnosis: Redis latency ev_1_abcd1234", available)
+	if !got.OK {
+		t.Fatalf("expected known evidence id to pass, got %#v", got)
 	}
 }

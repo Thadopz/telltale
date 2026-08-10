@@ -37,6 +37,24 @@ func TestSelectConfigFileFallsBackToDefaultNameWhenMissing(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeSecurityRejectsFailOpenStandaloneConfiguration(t *testing.T) {
+	if err := validateRuntimeSecurity(false, "standalone"); err == nil {
+		t.Fatal("expected permissions disabled to be rejected in standalone")
+	}
+	if err := validateRuntimeSecurity(false, "production"); err == nil {
+		t.Fatal("expected permissions disabled to be rejected in production")
+	}
+	if err := validateRuntimeSecurity(false, "test"); err != nil {
+		t.Fatalf("expected test environment exception, got %v", err)
+	}
+	if err := validateRuntimeSecurity(false, "eval"); err != nil {
+		t.Fatalf("expected eval environment exception, got %v", err)
+	}
+	if err := validateRuntimeSecurity(true, "standalone"); err != nil {
+		t.Fatalf("enabled permissions should always pass, got %v", err)
+	}
+}
+
 func createConfigFile(t *testing.T, root string, fileName string) {
 	t.Helper()
 

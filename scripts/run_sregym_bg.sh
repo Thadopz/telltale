@@ -19,7 +19,7 @@ nohup bash -c '
   export PYTHONUNBUFFERED=1
   cd /home/cyq22/SREGym
   uv run python main.py \
-    --agent superbiz-sreagent \
+    --agent superbiz-telltale \
     --model "${SREGYM_MODEL}" \
     --judge-model "${SREGYM_JUDGE_MODEL}" \
     --problem incorrect_image \

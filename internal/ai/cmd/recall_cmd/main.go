@@ -1,27 +1,17 @@
 package main
 
 import (
-	retriever2 "SREagent/internal/ai/retriever"
-	"SREagent/internal/appconfig"
 	"context"
 	"fmt"
+	"os"
+
+	"github.com/Thadopz/telltale/internal/cli"
 )
 
+// Compatibility wrapper for the historical recall command.
 func main() {
-	ctx := context.Background()
-	appconfig.Configure(ctx)
-	r, err := retriever2.NewMilvusRetriever(ctx)
-	if err != nil {
-		panic(err)
+	if err := cli.RunKnowledge(context.Background(), append([]string{"recall"}, os.Args[1:]...)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(cli.ExitCode(err))
 	}
-	query := "服务下线是什么原因"
-	docs, err := r.Retrieve(ctx, query)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Q：", query)
-	for _, doc := range docs {
-		fmt.Println("A：", doc.Content)
-	}
-	fmt.Println("Done", len(docs))
 }

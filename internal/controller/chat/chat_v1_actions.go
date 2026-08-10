@@ -1,16 +1,14 @@
 package chat
 
 import (
-	v1 "SREagent/api/chat/v1"
-	"SREagent/internal/actions"
-	"SREagent/internal/authz"
 	"context"
-
-	"github.com/gogf/gf/v2/frame/g"
+	v1 "github.com/Thadopz/telltale/api/chat/v1"
+	"github.com/Thadopz/telltale/internal/actions"
+	"github.com/Thadopz/telltale/internal/authz"
 )
 
 func (c *ControllerV1) ActionPrepare(ctx context.Context, req *v1.ActionPrepareReq) (res *v1.ActionPrepareRes, err error) {
-	ctx = authz.WithPrincipal(ctx, authz.PrincipalFromRequest(ctx, g.RequestFromCtx(ctx), req.UserId))
+	ctx = authz.WithPrincipal(ctx, authz.ConfiguredPrincipal(ctx))
 	prepared, err := actions.Prepare(ctx, req.ToolName, req.ArgumentsJSON)
 	if err != nil {
 		return nil, err
@@ -26,7 +24,7 @@ func (c *ControllerV1) ActionPrepare(ctx context.Context, req *v1.ActionPrepareR
 }
 
 func (c *ControllerV1) ActionConfirm(ctx context.Context, req *v1.ActionConfirmReq) (res *v1.ActionConfirmRes, err error) {
-	ctx = authz.WithPrincipal(ctx, authz.PrincipalFromRequest(ctx, g.RequestFromCtx(ctx), req.UserId))
+	ctx = authz.WithPrincipal(ctx, authz.ConfiguredPrincipal(ctx))
 	confirmed, err := actions.Confirm(ctx, req.Token, req.ArgumentsHash)
 	if err != nil {
 		return nil, err
@@ -40,7 +38,7 @@ func (c *ControllerV1) ActionConfirm(ctx context.Context, req *v1.ActionConfirmR
 }
 
 func (c *ControllerV1) ActionExecute(ctx context.Context, req *v1.ActionExecuteReq) (res *v1.ActionExecuteRes, err error) {
-	ctx = authz.WithPrincipal(ctx, authz.PrincipalFromRequest(ctx, g.RequestFromCtx(ctx), req.UserId))
+	ctx = authz.WithPrincipal(ctx, authz.ConfiguredPrincipal(ctx))
 	executed, err := actions.Execute(ctx, req.Token, req.ToolName, req.ArgumentsJSON)
 	if err != nil {
 		return nil, err

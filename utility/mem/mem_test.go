@@ -1,7 +1,7 @@
 package mem
 
 import (
-	"SREagent/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"context"
 	"os"
 	"path/filepath"

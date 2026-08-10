@@ -43,24 +43,3 @@ func TestLoadStreamableHTTPMCPToolsListsAndCallsTool(t *testing.T) {
 		t.Fatalf("unexpected MCP tool output: %s", output)
 	}
 }
-
-func TestSREGymEndpointsUseStreamableHTTPPaths(t *testing.T) {
-	t.Setenv("API_HOSTNAME", "sregym.local")
-	t.Setenv("API_PORT", "8000")
-	t.Setenv("MCP_SERVER_PORT", "9954")
-	t.Setenv("SREGYM_KUBECTL_MCP_URL", "")
-	t.Setenv("SREGYM_PROMETHEUS_MCP_URL", "")
-	t.Setenv("SREGYM_JAEGER_MCP_URL", "")
-
-	endpoints := sregymEndpoints(context.Background())
-	expected := map[string]string{
-		"kubectl":    "http://sregym.local:9954/kubectl/mcp",
-		"prometheus": "http://sregym.local:9954/prometheus/mcp",
-		"jaeger":     "http://sregym.local:9954/jaeger/mcp",
-	}
-	for _, endpoint := range endpoints {
-		if expected[endpoint.Name] != endpoint.URL {
-			t.Fatalf("unexpected %s endpoint: %s", endpoint.Name, endpoint.URL)
-		}
-	}
-}

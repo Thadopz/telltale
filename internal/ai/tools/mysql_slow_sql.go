@@ -3,12 +3,12 @@ package tools
 import (
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/sqlobserve"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
 )
 
 const (
@@ -17,9 +17,20 @@ const (
 )
 
 type MysqlSlowSQLInput struct {
+	Target string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to default; never provide a DSN or server credentials"`
 	Source string `json:"source,omitempty" jsonschema:"description=Slow SQL source: performance_schema, sys, slow_log, or auto. Defaults to performance_schema"`
+	Window string `json:"window,omitempty" jsonschema:"description=Optional observation window such as 5m or 30m"`
 	SortBy string `json:"sort_by,omitempty" jsonschema:"description=Sort mode: avg_latency, total_latency, rows_examined, exec_count, query_time, or recent. Defaults depend on source"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return. Values are clamped to 1..100; default is 20"`
+}
+
+// DBSlowQueriesInput is the database-agent input. It deliberately omits the
+// adapter-specific source field; the configured adapter chooses its source.
+type DBSlowQueriesInput struct {
+	Target string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to the configured default target"`
+	Window string `json:"window,omitempty" jsonschema:"description=Optional observation window such as 5m or 30m"`
+	SortBy string `json:"sort_by,omitempty" jsonschema:"description=Generic sort mode such as latency, frequency, resource, or recent"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return; the server applies the configured limit"`
 }
 
 type mysqlSlowSQLQuery struct {
@@ -29,40 +40,54 @@ type mysqlSlowSQLQuery struct {
 	SQL    string
 }
 
+func NewDBSlowQueriesTool() (tool.InvokableTool, error) {
+	return utils.InferOptionableTool(
+		"db_slow_queries",
+		"Find bounded top slow-query records for the configured business database using its supported read-only observation source.",
+		func(ctx context.Context, input *DBSlowQueriesInput, _ ...tool.Option) (string, error) {
+			if input == nil {
+				input = &DBSlowQueriesInput{}
+			}
+			budget := sqlobserve.LoadResultBudget(ctx)
+			return runConfiguredSQLObservation(ctx, sqlobserve.QueryRequest{
+				Kind:     sqlobserve.QuerySlowSQL,
+				Target:   input.Target,
+				Source:   "auto",
+				Window:   input.Window,
+				SortBy:   input.SortBy,
+				Limit:    budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
+				MaxBytes: budget.AgentMaxBytes,
+			})
+		},
+	)
+}
+
 func NewMysqlSlowSQLTool() (tool.InvokableTool, error) {
 	t, err := utils.InferOptionableTool(
 		"mysql_slow_sql",
 		"Find slow MySQL statements using fixed read-only queries against performance_schema, sys.statement_analysis, or mysql.slow_log. Use this when investigating database latency, slow API responses, query timeout, high rows examined, or SQL performance issues.",
 		func(ctx context.Context, input *MysqlSlowSQLInput, opts ...tool.Option) (string, error) {
-			query, err := buildMysqlSlowSQLQuery(input)
+			if input == nil {
+				input = &MysqlSlowSQLInput{}
+			}
+			budget := sqlobserve.LoadResultBudget(ctx)
+			observer, err := sqlobserve.NewConfiguredObserver(ctx)
 			if err != nil {
-				return marshalToolError(err, "invalid mysql slow sql input"), nil
+				return marshalToolError(err, "load mysql observation configuration failed"), nil
 			}
-
-			dsn, err := configuredMysqlDSN(ctx)
-			if err != nil {
-				return marshalToolError(err, "load mysql configuration failed"), nil
+			envelope, queryErr := observer.Query(ctx, sqlobserve.QueryRequest{
+				Kind:     sqlobserve.QuerySlowSQL,
+				Target:   input.Target,
+				Source:   input.Source,
+				Window:   input.Window,
+				SortBy:   input.SortBy,
+				Limit:    budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
+				MaxBytes: budget.AgentMaxBytes,
+			})
+			if queryErr != nil {
+				return marshalToolError(queryErr, "execute mysql slow sql query failed"), nil
 			}
-			db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
-			if err != nil {
-				return marshalToolError(err, "connect mysql failed"), nil
-			}
-			sqlDB, err := db.DB()
-			if err == nil {
-				defer sqlDB.Close()
-			}
-
-			var rows []map[string]any
-			if err = db.WithContext(ctx).Raw(query.SQL).Scan(&rows).Error; err != nil {
-				return marshalToolError(err, "execute mysql slow sql query failed"), nil
-			}
-
-			return marshalToolData(map[string]any{
-				"source":  query.Source,
-				"sort_by": query.SortBy,
-				"limit":   query.Limit,
-				"rows":    rows,
-			}, fmt.Sprintf("mysql slow sql query returned %d rows", len(rows))), nil
+			return evidence.Marshal(envelope), nil
 		})
 	if err != nil {
 		return nil, err

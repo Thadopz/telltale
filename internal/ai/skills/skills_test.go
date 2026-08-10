@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"github.com/Thadopz/telltale/internal/authz"
 	"context"
 	"os"
 	"path/filepath"
@@ -123,6 +124,75 @@ func TestFormatSelectedWrapsSkillBlocks(t *testing.T) {
 	}
 	if !strings.Contains(got, "==== End Skill ====") {
 		t.Fatalf("expected skill footer, got %q", got)
+	}
+}
+
+func TestSelectForUsesExplicitScopeDomainAndCapabilityBeforeQueryRanking(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, filepath.Join(dir, "payment", "SKILL.md"), `---
+name: payment-diagnostics
+description: Generic incident procedure.
+domain: payment
+agent_scopes:
+  - payment_agent
+capabilities:
+  - payment.diagnose
+---
+
+Payment evidence procedure.
+`)
+	writeSkill(t, filepath.Join(dir, "database", "SKILL.md"), `---
+name: database-diagnostics
+description: Payment callback wording must not grant database access.
+domain: database
+agent_scopes:
+  - database_agent
+capabilities:
+  - database.diagnose
+---
+
+Database evidence procedure.
+`)
+
+	selected, err := SelectFor(context.Background(), Config{
+		Dirs:         []string{dir},
+		MaxSelected:  2,
+		MaxBodyChars: 100,
+	}, "database payment callback", SelectionContext{
+		AgentScope:   authz.AgentScopePayment,
+		Domain:       "payment",
+		Capabilities: []string{"payment.diagnose"},
+	})
+	if err != nil {
+		t.Fatalf("select scoped skills: %v", err)
+	}
+	if len(selected) != 1 || selected[0].Name != "payment-diagnostics" {
+		t.Fatalf("expected only payment skill, got %+v", selected)
+	}
+}
+
+func TestSelectForRejectsUnscopedSkillForDomainAgent(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, filepath.Join(dir, "generic", "SKILL.md"), `---
+name: generic-diagnostics
+description: This description mentions payment and database.
+---
+
+Generic procedure.
+`)
+
+	selected, err := SelectFor(context.Background(), Config{
+		Dirs:        []string{dir},
+		MaxSelected: 2,
+	}, "payment callback", SelectionContext{
+		AgentScope: authz.AgentScopePayment,
+		Domain:     "payment",
+	})
+	if err != nil {
+		t.Fatalf("select scoped skills: %v", err)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("unscoped skill must not be visible to domain agent: %+v", selected)
 	}
 }
 

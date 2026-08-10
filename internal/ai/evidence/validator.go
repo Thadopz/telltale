@@ -1,13 +1,10 @@
 package evidence
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
 var (
-	evidenceIDPattern    = regexp.MustCompile(`\bev_[0-9]+_[a-f0-9]+\b`)
-	failedQueryIDPattern = regexp.MustCompile(`\bfq_[0-9]+_[a-f0-9]+\b`)
+	evidenceIDPattern    = regexp.MustCompile(`\bev_[A-Za-z0-9_-]+\b`)
+	failedQueryIDPattern = regexp.MustCompile(`\bfq_[A-Za-z0-9_-]+\b`)
 )
 
 type EvidenceSet struct {
@@ -50,6 +47,9 @@ func Merge(sets ...EvidenceSet) EvidenceSet {
 	return merged
 }
 
+// ValidateAnswer only validates identifier references. Coverage, freshness,
+// claim type, and language-localized wording are decided before rendering by
+// the structured Claim -> Matcher pipeline.
 func ValidateAnswer(answer string, available EvidenceSet) ValidationResult {
 	answerIDs := ExtractIDs(answer)
 	var reasons []string
@@ -63,33 +63,5 @@ func ValidateAnswer(answer string, available EvidenceSet) ValidationResult {
 			reasons = append(reasons, "answer cites unknown failed_query_id "+id)
 		}
 	}
-	if len(available.FailedQueryIDs) > 0 && len(answerIDs.FailedQueryIDs) == 0 && !containsUnverifiedLanguage(answer) {
-		reasons = append(reasons, "failed tool calls exist but answer does not mark any evidence gap")
-	}
-	if len(available.EvidenceIDs) > 0 && len(answerIDs.EvidenceIDs) == 0 && containsStrongDiagnosisLanguage(answer) {
-		reasons = append(reasons, "answer makes diagnostic claims without citing evidence_id")
-	}
 	return ValidationResult{OK: len(reasons) == 0, Reasons: reasons}
-}
-
-func containsUnverifiedLanguage(answer string) bool {
-	for _, marker := range []string{
-		"未验证", "证据不足", "证据缺口", "无法确认", "无法判断", "查询失败", "不可用", "unknown", "not verified",
-	} {
-		if strings.Contains(strings.ToLower(answer), strings.ToLower(marker)) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsStrongDiagnosisLanguage(answer string) bool {
-	for _, marker := range []string{
-		"判断", "结论", "根因", "原因", "导致", "确认", "已确认", "异常", "故障",
-	} {
-		if strings.Contains(answer, marker) {
-			return true
-		}
-	}
-	return false
 }

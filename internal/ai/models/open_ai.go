@@ -1,6 +1,7 @@
 package models
 
 import (
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"context"
 	"fmt"
 	"strings"
@@ -11,22 +12,9 @@ import (
 )
 
 func OpenAIForDeepSeekV31Think(ctx context.Context) (cm model.ToolCallingChatModel, err error) {
-	model, err := g.Cfg().Get(ctx, "think_chat_model.model")
+	config, err := configuredOpenAIChatModel(ctx, "think_chat_model")
 	if err != nil {
 		return nil, err
-	}
-	api_key, err := g.Cfg().Get(ctx, "think_chat_model.api_key")
-	if err != nil {
-		return nil, err
-	}
-	base_url, err := g.Cfg().Get(ctx, "think_chat_model.base_url")
-	if err != nil {
-		return nil, err
-	}
-	config := &openai.ChatModelConfig{
-		Model:   model.String(),
-		APIKey:  api_key.String(),
-		BaseURL: base_url.String(),
 	}
 	cm, err = openai.NewChatModel(ctx, config)
 	if err != nil {
@@ -36,22 +24,9 @@ func OpenAIForDeepSeekV31Think(ctx context.Context) (cm model.ToolCallingChatMod
 }
 
 func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatModel, err error) {
-	model, err := g.Cfg().Get(ctx, "quick_chat_model.model")
+	config, err := configuredOpenAIChatModel(ctx, "quick_chat_model")
 	if err != nil {
 		return nil, err
-	}
-	api_key, err := g.Cfg().Get(ctx, "quick_chat_model.api_key")
-	if err != nil {
-		return nil, err
-	}
-	base_url, err := g.Cfg().Get(ctx, "quick_chat_model.base_url")
-	if err != nil {
-		return nil, err
-	}
-	config := &openai.ChatModelConfig{
-		Model:   model.String(),
-		APIKey:  api_key.String(),
-		BaseURL: base_url.String(),
 	}
 	cm, err = openai.NewChatModel(ctx, config)
 	if err != nil {
@@ -61,28 +36,40 @@ func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatMode
 }
 
 func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) {
-	modelName, err := requiredModelConfig(ctx, "failover_chat_model.model")
-	if err != nil {
-		return nil, err
-	}
-	apiKey, err := requiredModelConfig(ctx, "failover_chat_model.api_key")
-	if err != nil {
-		return nil, err
-	}
-	baseURL, err := requiredModelConfig(ctx, "failover_chat_model.base_url")
+	config, err := configuredOpenAIChatModel(ctx, "failover_chat_model")
 	if err != nil {
 		return nil, err
 	}
 
-	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		Model:   modelName,
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-	})
+	chatModel, err := openai.NewChatModel(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("create failover chat model: %w", err)
 	}
 	return chatModel, nil
+}
+
+func configuredOpenAIChatModel(ctx context.Context, configKey string) (*openai.ChatModelConfig, error) {
+	modelName, err := requiredModelConfig(ctx, configKey+".model")
+	if err != nil {
+		return nil, err
+	}
+	apiKey, err := requiredModelConfig(ctx, configKey+".api_key")
+	if err != nil {
+		return nil, err
+	}
+	baseURL, err := requiredModelConfig(ctx, configKey+".base_url")
+	if err != nil {
+		return nil, err
+	}
+
+	profile := contextbudget.ConfiguredProfile(ctx, configKey)
+	maxCompletionTokens := profile.MaxOutputTokens
+	return &openai.ChatModelConfig{
+		Model:               modelName,
+		APIKey:              apiKey,
+		BaseURL:             baseURL,
+		MaxCompletionTokens: &maxCompletionTokens,
+	}, nil
 }
 
 func requiredModelConfig(ctx context.Context, key string) (string, error) {

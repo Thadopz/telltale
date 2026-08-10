@@ -3,7 +3,7 @@ package trace
 import (
 	"testing"
 
-	"SREagent/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"

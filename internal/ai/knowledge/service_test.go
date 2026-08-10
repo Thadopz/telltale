@@ -1,7 +1,7 @@
 package knowledge
 
 import (
-	"SREagent/internal/authz"
+	"github.com/Thadopz/telltale/internal/authz"
 	"context"
 	"errors"
 	"testing"
@@ -127,7 +127,7 @@ func TestSearchDoesNotShareCacheAcrossUsers(t *testing.T) {
 
 func TestSearchDoesNotCacheFailures(t *testing.T) {
 	service := NewService()
-	searcher := &countingRetriever{err: errors.New("milvus unavailable")}
+	searcher := &countingRetriever{err: errors.New("sqlite retriever unavailable")}
 
 	for attempt := 0; attempt < 2; attempt++ {
 		_, err := service.Search(context.Background(), SearchRequest{

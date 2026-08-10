@@ -1,8 +1,8 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/authz"
 	"context"
+	"github.com/Thadopz/telltale/internal/authz"
 	"sort"
 	"strings"
 	"sync"

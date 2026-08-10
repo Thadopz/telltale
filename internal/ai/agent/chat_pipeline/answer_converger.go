@@ -1,237 +1,352 @@
 package chat_pipeline
 
 import (
-	"SREagent/internal/ai/agent/trace"
-	"SREagent/internal/ai/evidence"
 	"context"
-	"encoding/json"
+	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/agent/trace"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"sort"
 	"strings"
-	"time"
-
-	"github.com/cloudwego/eino/schema"
 )
 
-const answerFinalizerTimeout = 35 * time.Second
-
 type AnswerConvergeInput struct {
-	Question     string
-	Answer       string
-	Steps        []trace.AgentStep
-	ToolEvidence []trace.ToolEvidence
-	Finalize     func(context.Context, string, []trace.ToolEvidence) (string, error)
+	Question        string
+	Answer          string
+	Mode            ResponseMode
+	DiagnosticState *DiagnosticState
+	Steps           []trace.AgentStep
+	ToolEvidence    []trace.ToolEvidence
+
+	// ClaimExtractor and Localizer are injectable so deterministic tests do not
+	// need a real model. Production callers may leave both fields nil.
+	ClaimExtractor ClaimExtractor
+	Localizer      AnswerLocalizer
+	Recorder       *trace.Recorder
+	PipelineResult *ClaimPipelineResult
+
+	// Finalize is retained for source compatibility with older callers. It is
+	// intentionally not used for evidence coverage anymore.
+	Finalize func(context.Context, string, []trace.ToolEvidence) (string, error)
+}
+
+type ClaimPipelineResult struct {
+	ClaimSet          evidence.ClaimSet
+	CoverageReports   []evidence.CoverageReport
+	Hypotheses        []Hypothesis
+	EvidenceConflicts []evidence.EvidenceConflict
+	ProtocolIssues    []evidence.EvidenceProtocolIssue
+	ExtractionError   string
+	LocalizationMode  string
+}
+
+type evidenceCollection struct {
+	Items          []evidence.EvidenceItem
+	FailedQueries  []evidence.FailedQuery
+	Conflicts      []evidence.EvidenceConflict
+	ProtocolIssues []evidence.EvidenceProtocolIssue
 }
 
 func ConvergeAnswer(ctx context.Context, input AnswerConvergeInput) (string, error) {
-	answer := strings.TrimSpace(input.Answer)
-	if answer != "" {
-		if len(input.ToolEvidence) > 0 {
-			return enforceEvidenceAnswerWithTools(ctx, input.Question, answer, input.Steps, input.ToolEvidence)
+	draftAnswer := strings.TrimSpace(input.Answer)
+	mode := normalizeResponseMode(input.Mode)
+	collection := collectEvidence(input.Steps, input.ToolEvidence)
+	evidenceItems := collection.Items
+	failedQueries := collection.FailedQueries
+	if input.PipelineResult != nil {
+		input.PipelineResult.EvidenceConflicts = append([]evidence.EvidenceConflict(nil), collection.Conflicts...)
+		input.PipelineResult.ProtocolIssues = append([]evidence.EvidenceProtocolIssue(nil), collection.ProtocolIssues...)
+		if input.DiagnosticState != nil {
+			input.PipelineResult.Hypotheses = append([]Hypothesis(nil), input.DiagnosticState.Hypotheses...)
 		}
-		return enforceEvidenceAnswerFromTrace(ctx, answer, input.Steps)
 	}
-	if len(input.ToolEvidence) == 0 {
+	if mode == ResponseModeNormal {
+		if draftAnswer == "" {
+			return "", fmt.Errorf("normal chat answer is empty")
+		}
+		available := evidenceSetFromEvidenceItems(evidenceItems, failedQueries)
+		if validation := evidence.ValidateAnswer(draftAnswer, available); !validation.OK {
+			return "", fmt.Errorf("normal chat answer failed evidence validation: %s", strings.Join(validation.Reasons, "; "))
+		}
+		return draftAnswer, nil
+	}
+	if len(evidenceItems) == 0 && len(failedQueries) == 0 {
+		if len(collection.ProtocolIssues) > 0 {
+			return protocolIssueAnswer(collection.ProtocolIssues), nil
+		}
 		return noEvidenceAnswer(), nil
 	}
 
-	finalize := input.Finalize
-	if finalize == nil {
-		finalize = finalizeAnswerWithModel
+	extractor := input.ClaimExtractor
+	if extractor == nil {
+		var err error
+		extractor, err = defaultClaimExtractor(ctx)
+		if err != nil {
+			setClaimPipelineError(input.PipelineResult, err)
+			recordClaimPipelineFailure(input.Recorder, err)
+			return "", err
+		}
 	}
-	finalized, err := finalize(ctx, input.Question, input.ToolEvidence)
-	if err == nil && strings.TrimSpace(finalized) != "" {
-		return enforceEvidenceAnswerWithTools(ctx, input.Question, finalized, input.Steps, input.ToolEvidence)
-	}
-	return deterministicEvidenceAnswer(input.Question, input.ToolEvidence), nil
-}
 
-func enforceEvidenceAnswerWithTools(ctx context.Context, question string, answer string, steps []trace.AgentStep, tools []trace.ToolEvidence) (string, error) {
-	if composed := composeCoverageAnswer(answer, steps); composed != "" {
-		return composed, nil
-	}
-	available := evidenceSetFromToolEvidence(tools)
-	return validateAndRepairEvidenceAnswer(ctx, answer, steps, available, func([]string) string {
-		return deterministicEvidenceAnswer(question, tools)
-	})
-}
-
-func validateAndRepairEvidenceAnswer(
-	ctx context.Context,
-	answer string,
-	steps []trace.AgentStep,
-	available evidence.EvidenceSet,
-	fallback func([]string) string,
-) (string, error) {
-	validation := evidence.ValidateAnswer(answer, available)
-	if validation.OK {
-		return answer, nil
-	}
-	if len(available.EvidenceIDs) == 0 && len(available.FailedQueryIDs) == 0 {
-		return answer, nil
-	}
-	repaired, err := repairEvidenceAnswer(ctx, answer, steps, validation.Reasons)
-	if err != nil || strings.TrimSpace(repaired) == "" {
-		return fallback(validation.Reasons), nil
-	}
-	// 模型修复也可能引入不存在的证据编号，因此返回前必须再次校验。
-	if evidence.ValidateAnswer(repaired, available).OK {
-		return repaired, nil
-	}
-	return fallback(validation.Reasons), nil
-}
-
-func finalizeAnswerWithModel(ctx context.Context, question string, tools []trace.ToolEvidence) (string, error) {
-	model, err := newChatModel(ctx)
-	if err != nil {
-		return "", err
-	}
-	finalCtx, cancel := context.WithTimeout(ctx, answerFinalizerTimeout)
-	defer cancel()
-	msg, err := model.Generate(finalCtx, []*schema.Message{
-		schema.SystemMessage(`You are the final-answer converger for an SRE incident agent.
-Do not call tools. You cannot request more evidence.
-Use only the provided tool evidence.
-Return a concise final answer.
-Every factual claim based on a tool must cite its evidence_id.`),
-		schema.UserMessage("User question:\n" + strings.TrimSpace(question) + "\n\nTool evidence:\n" + compactToolEvidenceForFinalizer(tools)),
+	claimSet, err := extractor.Extract(ctx, ClaimExtractionInput{
+		Question:          strings.TrimSpace(input.Question),
+		DraftAnswer:       draftAnswer,
+		EvidenceItems:     evidenceItems,
+		FailedQueries:     failedQueries,
+		DiagnosticSummary: diagnosticSummary(input.Steps),
 	})
 	if err != nil {
+		setClaimPipelineError(input.PipelineResult, err)
+		recordClaimPipelineFailure(input.Recorder, err)
 		return "", err
 	}
-	return strings.TrimSpace(msg.Content), nil
-}
+	claimSet = evidence.NormalizeClaimSet(claimSet)
+	if err := evidence.ValidateClaimSet(claimSet); err != nil {
+		setClaimPipelineError(input.PipelineResult, err)
+		recordClaimPipelineFailure(input.Recorder, err)
+		return "", err
+	}
 
-func evidenceSetFromToolEvidence(items []trace.ToolEvidence) evidence.EvidenceSet {
-	sets := make([]evidence.EvidenceSet, 0, len(items)*2)
-	for _, item := range items {
-		sets = append(sets, evidence.ExtractIDs(item.OutputJSON))
-		if item.EvidenceID != "" {
-			sets = append(sets, evidence.EvidenceSet{EvidenceIDs: map[string]bool{item.EvidenceID: true}})
-		}
-		if item.FailedQueryID != "" {
-			sets = append(sets, evidence.EvidenceSet{FailedQueryIDs: map[string]bool{item.FailedQueryID: true}})
-		}
+	reports := matchClaimSetWithConflicts(claimSet, evidenceItems, failedQueries, collection.Conflicts)
+	if input.PipelineResult != nil {
+		input.PipelineResult.ClaimSet = claimSet
+		input.PipelineResult.CoverageReports = append([]evidence.CoverageReport(nil), reports...)
+		input.PipelineResult.ExtractionError = ""
 	}
-	return evidence.Merge(sets...)
-}
-
-func compactToolEvidenceForFinalizer(items []trace.ToolEvidence) string {
-	var b strings.Builder
-	for _, item := range items {
-		b.WriteString("- tool=")
-		b.WriteString(item.ToolName)
-		if item.EvidenceID != "" {
-			b.WriteString(" evidence_id=")
-			b.WriteString(item.EvidenceID)
-		}
-		if item.FailedQueryID != "" {
-			b.WriteString(" failed_query_id=")
-			b.WriteString(item.FailedQueryID)
-		}
-		if item.Summary != "" {
-			b.WriteString(" summary=")
-			b.WriteString(item.Summary)
-		}
-		if item.InputJSON != "" {
-			b.WriteString(" input=")
-			b.WriteString(trimForFinalizer(item.InputJSON, 300))
-		}
-		raw := toolEvidenceText(item)
-		if raw != "" {
-			b.WriteString("\n  output=")
-			b.WriteString(trimForFinalizer(raw, 2200))
-		}
-		b.WriteByte('\n')
+	localizer := input.Localizer
+	localizationMode := "template"
+	if localizer == nil {
+		localizer = NewTemplateAnswerLocalizer()
+	} else {
+		localizationMode = "custom"
 	}
-	return strings.TrimSpace(b.String())
-}
-
-func deterministicEvidenceAnswer(question string, items []trace.ToolEvidence) string {
-	var b strings.Builder
-	b.WriteString("Verified evidence:\n")
-	wrote := false
-	for _, item := range items {
-		if item.Envelope.Status == evidence.StatusSuccess && item.EvidenceID != "" && item.Envelope.CanUseAsEvidence {
-			wrote = true
-			b.WriteString("- ")
-			b.WriteString(item.EvidenceID)
-			b.WriteString(": ")
-			b.WriteString(nonEmpty(item.Summary, "tool call succeeded"))
-			b.WriteString(" (tool: ")
-			b.WriteString(item.ToolName)
-			b.WriteString(")\n")
-		}
+	answer, err := localizer.Localize(ctx, input.Question, reports)
+	if err != nil {
+		setClaimPipelineError(input.PipelineResult, err)
+		recordClaimPipelineFailure(input.Recorder, err)
+		return "", err
 	}
-	if !wrote {
-		b.WriteString("- No successful evidence_id is available.\n")
-	}
-	b.WriteString("\nUnverified / evidence gaps:\n")
-	gap := false
-	for _, item := range items {
-		if item.FailedQueryID != "" {
-			gap = true
-			b.WriteString("- ")
-			b.WriteString(item.FailedQueryID)
-			b.WriteString(": ")
-			b.WriteString(nonEmpty(item.Summary, "tool call failed"))
-			b.WriteByte('\n')
-		}
-	}
-	if !gap {
-		b.WriteString("- No failed query IDs were recorded.\n")
-	}
-	b.WriteString("\nAssessment:\n")
-	b.WriteString("- The agent reached tool evidence but did not produce a model final answer; this conservative answer avoids inventing unsupported facts.\n")
-	if strings.TrimSpace(question) != "" {
-		b.WriteString("\nOriginal request:\n- ")
-		b.WriteString(trimForFinalizer(question, 500))
-		b.WriteByte('\n')
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func toolEvidenceText(item trace.ToolEvidence) string {
-	if item.OutputJSON != "" {
-		var env evidence.Envelope
-		if err := json.Unmarshal([]byte(item.OutputJSON), &env); err == nil {
-			if s, ok := env.Data.(string); ok && strings.TrimSpace(s) != "" {
-				return s
-			}
-			if b, err := json.Marshal(env.Data); err == nil && string(b) != "null" {
-				return string(b)
+	if strings.TrimSpace(answer) == "" {
+		if input.Localizer != nil {
+			answer, err = NewTemplateAnswerLocalizer().Localize(ctx, input.Question, reports)
+			localizationMode = "template"
+			if err != nil {
+				setClaimPipelineError(input.PipelineResult, err)
+				recordClaimPipelineFailure(input.Recorder, err)
+				return "", err
 			}
 		}
-		return item.OutputJSON
-	}
-	if item.Envelope.Data != nil {
-		if s, ok := item.Envelope.Data.(string); ok && strings.TrimSpace(s) != "" {
-			return s
-		}
-		if b, err := json.Marshal(item.Envelope.Data); err == nil && string(b) != "null" {
-			return string(b)
+		if strings.TrimSpace(answer) == "" {
+			answer = noStructuredClaimAnswer()
 		}
 	}
-	return item.Summary
+
+	reportEvidence := evidenceSetFromReports(reports)
+	if validation := evidence.ValidateAnswer(answer, reportEvidence); !validation.OK {
+		recordClaimPipelineFailure(input.Recorder, fmt.Errorf("localized answer failed evidence validation: %s", strings.Join(validation.Reasons, "; ")))
+		return "", fmt.Errorf("localized answer failed evidence validation: %s", strings.Join(validation.Reasons, "; "))
+	}
+	recordClaimPipeline(input.Recorder, claimSet, reports, localizationMode, collection.Conflicts)
+	if input.PipelineResult != nil {
+		input.PipelineResult.LocalizationMode = localizationMode
+	}
+	return strings.TrimSpace(answer), nil
 }
-func trimForFinalizer(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
+
+func setClaimPipelineError(result *ClaimPipelineResult, err error) {
+	if result == nil || err == nil {
+		return
 	}
-	if max <= 3 {
-		return s[:max]
+	result.ExtractionError = truncateClaimError(err)
+}
+
+func collectEvidence(steps []trace.AgentStep, toolEvidence []trace.ToolEvidence) evidenceCollection {
+	fromTools, failedFromTools, toolIssues := evidenceFromToolEvidenceDetailed(toolEvidence)
+	fromTrace, failedFromTrace, traceIssues := evidenceFromTraceDetailed(steps)
+	evidenceItems, conflicts := mergeEvidenceItemsDetailed(fromTools, fromTrace)
+	return evidenceCollection{
+		Items:          evidenceItems,
+		FailedQueries:  mergeFailedQueries(failedFromTools, failedFromTrace),
+		Conflicts:      conflicts,
+		ProtocolIssues: append(toolIssues, traceIssues...),
 	}
-	return s[:max-3] + "..."
+}
+
+func mergeEvidenceItems(groups ...[]evidence.EvidenceItem) []evidence.EvidenceItem {
+	items, _ := mergeEvidenceItemsDetailed(groups...)
+	return items
+}
+
+func mergeEvidenceItemsDetailed(groups ...[]evidence.EvidenceItem) ([]evidence.EvidenceItem, []evidence.EvidenceConflict) {
+	byID := make(map[string]evidence.EvidenceItem)
+	order := make([]string, 0)
+	var conflicts []evidence.EvidenceConflict
+	for _, group := range groups {
+		for _, item := range group {
+			id := strings.TrimSpace(item.EvidenceID)
+			if id == "" {
+				continue
+			}
+			previous, exists := byID[id]
+			if !exists {
+				order = append(order, id)
+				byID[id] = item
+				continue
+			}
+			firstDigest := evidence.DigestEvidenceItem(previous)
+			secondDigest := evidence.DigestEvidenceItem(item)
+			if firstDigest != secondDigest {
+				conflicts = append(conflicts, evidence.EvidenceConflict{
+					EvidenceID:     id,
+					FirstDigest:    firstDigest,
+					SecondDigest:   secondDigest,
+					FirstToolName:  previous.ToolName,
+					SecondToolName: item.ToolName,
+				})
+			}
+		}
+	}
+	result := make([]evidence.EvidenceItem, 0, len(order))
+	for _, id := range order {
+		result = append(result, byID[id])
+	}
+	return result, conflicts
+}
+
+func mergeFailedQueries(groups ...[]evidence.FailedQuery) []evidence.FailedQuery {
+	byID := make(map[string]evidence.FailedQuery)
+	order := make([]string, 0)
+	for _, group := range groups {
+		for _, query := range group {
+			id := strings.TrimSpace(query.FailedQueryID)
+			if id == "" {
+				continue
+			}
+			if _, exists := byID[id]; !exists {
+				order = append(order, id)
+			}
+			byID[id] = query
+		}
+	}
+	result := make([]evidence.FailedQuery, 0, len(order))
+	for _, id := range order {
+		result = append(result, byID[id])
+	}
+	return result
+}
+
+func evidenceSetFromEvidenceItems(items []evidence.EvidenceItem, failedQueries []evidence.FailedQuery) evidence.EvidenceSet {
+	set := evidence.EvidenceSet{
+		EvidenceIDs:    make(map[string]bool),
+		FailedQueryIDs: make(map[string]bool),
+	}
+	for _, item := range items {
+		if item.EvidenceID != "" {
+			set.EvidenceIDs[item.EvidenceID] = true
+		}
+	}
+	for _, query := range failedQueries {
+		if query.FailedQueryID != "" {
+			set.FailedQueryIDs[query.FailedQueryID] = true
+		}
+	}
+	return set
+}
+
+func diagnosticSummary(steps []trace.AgentStep) string {
+	var builder strings.Builder
+	for _, step := range steps {
+		if step.Phase != "end" && step.Phase != "error" {
+			continue
+		}
+		fmt.Fprintf(&builder, "- phase=%s component=%s name=%s\n", step.Phase, step.Component, step.Name)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func noEvidenceAnswer() string {
-	return "Verified evidence:\n- No tool evidence was recorded.\n\nAssessment:\n- I cannot confirm the incident diagnosis without successful tool evidence.\n\nNext step:\n- Re-run targeted diagnostics and capture tool results before making a factual diagnosis."
+	return "Verified evidence:\n- No successful evidence_id is available.\n\nAssessment:\n- I cannot confirm the incident diagnosis without successful tool evidence.\n\nNext step:\n- Run targeted read-only diagnostics and capture structured evidence before making a factual diagnosis."
 }
 
-func nonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+func noStructuredClaimAnswer() string {
+	return "Evidence was collected, but no valid structured Claim was produced.\n\nAssessment:\n- No coverage result is available because evidence references must come from an explicit ClaimSet.\n\nNext step:\n- Produce a schema-valid ClaimSet with explicit evidence_id or failed_query_id references."
+}
+
+func protocolIssueAnswer(issues []evidence.EvidenceProtocolIssue) string {
+	var builder strings.Builder
+	builder.WriteString("Verified evidence:\n- No structured evidence is available.\n\n")
+	builder.WriteString("Evidence protocol issues:\n")
+	for _, issue := range issues {
+		fmt.Fprintf(&builder, "- %s: %s\n", issue.ToolName, issue.Reason)
+	}
+	builder.WriteString("\nNext step:\n- Update the diagnostic tool result to return a structured evidence envelope.")
+	return strings.TrimSpace(builder.String())
+}
+
+func recordClaimPipelineFailure(recorder *trace.Recorder, err error) {
+	if recorder == nil {
+		return
+	}
+	recorder.Record(trace.AgentStep{
+		Agent:                 "chat_answer_converger",
+		Phase:                 "error",
+		Component:             "claim_extractor",
+		Type:                  "structured_claim_extraction",
+		Name:                  "claim_extractor",
+		ClaimSchemaVersion:    evidence.ClaimSchemaVersion,
+		ClaimExtractorSuccess: false,
+		ClaimExtractorError:   truncateClaimError(err),
+		LocalizationMode:      "template",
+	})
+}
+
+func recordClaimPipeline(recorder *trace.Recorder, claimSet evidence.ClaimSet, reports []evidence.CoverageReport, localizationMode string, conflicts []evidence.EvidenceConflict) {
+	if recorder == nil {
+		return
+	}
+	statuses := make([]string, 0, len(reports))
+	for _, report := range reports {
+		statuses = append(statuses, report.Status)
+	}
+	sort.Strings(statuses)
+	recorder.Record(trace.AgentStep{
+		Agent:                 "chat_answer_converger",
+		Phase:                 "end",
+		Component:             "claim_extractor",
+		Type:                  "structured_claim_extraction",
+		Name:                  "claim_extractor",
+		ClaimSchemaVersion:    claimSet.SchemaVersion,
+		ClaimCount:            len(claimSet.Claims),
+		ClaimExtractorSuccess: true,
+		CoverageStatuses:      statuses,
+		CoveredClaimCount:     countCoverage(reports, evidence.CoverageCovered),
+		SupportedClaimCount:   countCoverage(reports, evidence.CoverageSupported),
+		RefutedClaimCount:     countCoverage(reports, evidence.CoverageRefuted),
+		PartialClaimCount:     countCoverage(reports, evidence.CoveragePartial),
+		UnknownClaimCount:     countCoverage(reports, evidence.CoverageUnknown),
+		UncoveredClaimCount:   countCoverage(reports, evidence.CoverageUncovered),
+		ConflictClaimCount:    countCoverage(reports, evidence.CoverageConflict),
+		EvidenceConflictCount: len(conflicts),
+		LocalizationMode:      localizationMode,
+	})
+}
+
+func countCoverage(reports []evidence.CoverageReport, status string) int {
+	count := 0
+	for _, report := range reports {
+		if report.Status == status {
+			count++
 		}
 	}
-	return ""
+	return count
+}
+
+func truncateClaimError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	if len(message) <= 1000 {
+		return message
+	}
+	return message[:997] + "..."
 }
