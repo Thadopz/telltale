@@ -55,6 +55,24 @@ func TestValidateRuntimeSecurityRejectsFailOpenStandaloneConfiguration(t *testin
 	}
 }
 
+func TestEvidenceAblationModesAreEvalOnly(t *testing.T) {
+	if err := validateEvidenceModeEnvironment("full", "standalone"); err != nil {
+		t.Fatalf("full mode must preserve production behavior: %v", err)
+	}
+	if err := validateEvidenceModeEnvironment("raw_unenforced", "standalone"); err == nil {
+		t.Fatal("expected raw_unenforced to be rejected outside eval")
+	}
+	if err := validateEvidenceModeEnvironment("visible_unenforced", "production"); err == nil {
+		t.Fatal("expected visible_unenforced to be rejected outside eval")
+	}
+	if err := validateEvidenceModeEnvironment("raw_unenforced", "eval"); err != nil {
+		t.Fatalf("expected eval environment to allow ablation: %v", err)
+	}
+	if err := validateEvidenceModeEnvironment("unknown", "eval"); err == nil {
+		t.Fatal("expected unknown mode to be rejected")
+	}
+}
+
 func createConfigFile(t *testing.T, root string, fileName string) {
 	t.Helper()
 

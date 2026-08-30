@@ -14,14 +14,14 @@ func TestCollectEvidenceReportsConflictingDuplicateIDs(t *testing.T) {
 		Kind:   evidence.ObservationLogError,
 		Fields: map[string]any{"error_code": "ERR_ONE"},
 	}})
-	first.EvidenceID = "ev_same"
-	first.ObservedAt = time.Now().UTC()
+	first.Evidence.EvidenceID = "ev_same"
+	first.Evidence.Attestation.ObservedAt = time.Now().UTC()
 	second := evidence.NewDataWithObservations("second", "second", []evidence.Observation{{
 		Kind:   evidence.ObservationLogError,
 		Fields: map[string]any{"error_code": "ERR_TWO"},
 	}})
-	second.EvidenceID = "ev_same"
-	second.ObservedAt = time.Now().UTC()
+	second.Evidence.EvidenceID = "ev_same"
+	second.Evidence.Attestation.ObservedAt = time.Now().UTC()
 
 	collection := collectEvidence(nil, []trace.ToolEvidence{
 		{ToolName: "logs_a", Envelope: first},
@@ -35,13 +35,13 @@ func TestCollectEvidenceReportsConflictingDuplicateIDs(t *testing.T) {
 	}
 }
 
-func TestConvergeAnswerReportsUnstructuredToolResult(t *testing.T) {
+func TestConvergeAnswerTreatsPlainSuccessAsNonEvidence(t *testing.T) {
 	answer, err := ConvergeAnswer(context.Background(), AnswerConvergeInput{
 		Question: "diagnose the backend",
 		Answer:   "the backend is failing",
 		ToolEvidence: []trace.ToolEvidence{{
 			ToolName: "backend_health",
-			Envelope: evidence.Envelope{Success: true, Status: evidence.StatusSuccess, CanUseAsEvidence: true},
+			Envelope: evidence.NewData(map[string]any{"healthy": false}, "backend check returned data"),
 		}},
 	})
 	if err != nil {

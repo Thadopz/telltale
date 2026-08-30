@@ -33,7 +33,7 @@ func (configuredMCPStructuredTestTool) Info(context.Context) (*schema.ToolInfo, 
 }
 
 func (configuredMCPStructuredTestTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
-	return `{"content":[{"type":"text","text":"{\"success\":true,\"status\":\"success\",\"evidence_id\":\"ev_nested_1\",\"can_use_as_evidence\":true,\"data_status\":\"present\",\"source_kind\":\"runtime_log\",\"runtime_verified\":true,\"observations\":[{\"kind\":\"log_error\",\"summary\":\"runtime error\"}],\"summary\":\"structured MCP evidence\"}"}]}`, nil
+	return `{"content":[{"type":"text","text":"{\"protocol_version\":\"2\",\"status\":\"success\",\"data_status\":\"present\",\"evidence\":{\"evidence_id\":\"ev_nested_1\",\"provenance\":{\"source_kind\":\"runtime_log\",\"runtime_verified\":true},\"observations\":[{\"kind\":\"log_error\",\"summary\":\"runtime error\"}]},\"summary\":\"structured MCP evidence\"}"}]}`, nil
 }
 
 type configuredMCPFailingTool struct{}
@@ -90,7 +90,8 @@ func TestLoadConfiguredMCPServersGroupsAndNamespacesTools(t *testing.T) {
 		t.Fatalf("invoke configured MCP tool: %v", err)
 	}
 	parsed := evidence.Parse(output).Envelope
-	if !parsed.CanUseAsEvidence || len(parsed.Observations) != 1 || parsed.Observations[0].Kind != evidence.ObservationMCPToolResult {
+	record, ok := parsed.UsableEvidence()
+	if !ok || len(record.Observations) != 1 || record.Observations[0].Kind != evidence.ObservationMCPToolResult {
 		t.Fatalf("expected MCP evidence envelope, got %s", output)
 	}
 }
@@ -118,14 +119,28 @@ func TestConfiguredMCPToolPreservesStructuredEvidenceEnvelope(t *testing.T) {
 		t.Fatalf("invoke structured MCP tool: %v", err)
 	}
 	parsed := evidence.Parse(output).Envelope
-	if parsed.EvidenceID == "ev_nested_1" || parsed.SourceKind != evidence.SourceRuntimeLog || parsed.RuntimeVerified {
+	record, ok := parsed.UsableEvidence()
+	if !ok || record.EvidenceID == "ev_nested_1" || record.Provenance.SourceKind != evidence.SourceRuntimeLog || record.Provenance.RuntimeVerified {
 		t.Fatalf("structured MCP metadata was not reissued safely: %s", output)
 	}
-	if parsed.TrustLevel != evidence.ContentTrustUntrustedExternal || parsed.VersionAlignment != evidence.VersionUnknown {
+	if record.Attestation.IssuerTrust != evidence.ContentTrustUntrustedExternal || record.Provenance.VersionAlignment != evidence.VersionUnknown {
 		t.Fatalf("structured MCP result must remain untrusted and unaligned: %s", output)
 	}
-	if len(parsed.Observations) != 2 || parsed.Observations[0].Kind != evidence.ObservationLogError {
+	if len(record.Observations) != 2 || record.Observations[0].Kind != evidence.ObservationLogError {
 		t.Fatalf("structured and generic observations were not merged: %s", output)
+	}
+}
+
+func TestConfiguredMCPTextOutputExtractsRawBusinessProjection(t *testing.T) {
+	output := `{"content":[{"type":"text","text":"{\"status\":\"success\",\"data\":{\"service\":\"card-service\"},\"summary\":\"healthy\"}"}]}`
+	extracted, ok := configuredMCPTextOutput(output)
+	if !ok {
+		t.Fatal("expected JSON text block to be extracted")
+	}
+	for _, expected := range []string{`"status":"success"`, `"service":"card-service"`, `"summary":"healthy"`} {
+		if !strings.Contains(extracted, expected) {
+			t.Fatalf("missing %s in %s", expected, extracted)
+		}
 	}
 }
 

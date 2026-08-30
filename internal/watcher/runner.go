@@ -1,13 +1,15 @@
 package watcher
 
 import (
-	"github.com/Thadopz/telltale/internal/observability"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Thadopz/telltale/internal/diagnosis"
+	"github.com/Thadopz/telltale/internal/observability"
 
 	"github.com/gogf/gf/v2/frame/g"
 	"go.opentelemetry.io/otel/attribute"
@@ -115,13 +117,17 @@ func (r *Runner) evaluateRule(ctx context.Context, rule Rule) RuleResult {
 
 	state, transition := ApplySnapshot(state, rule, snapshot)
 	abnormal := IsAbnormal(rule, snapshot)
+	var incident *Incident
+	var diagnosisJob *DiagnosisJob
 	if state.State == StateFiring || transition == TransitionResolved {
-		incident := r.buildIncident(rule, snapshot, transition)
-		if err = r.store.SaveIncident(ctx, incident); err != nil {
-			return RuleResult{Rule: rule, Snapshot: snapshot, Abnormal: abnormal, Transition: transition, State: state, Err: err}
+		builtIncident := r.buildIncident(rule, snapshot, transition)
+		incident = &builtIncident
+		if transition == TransitionOpened && r.config.Diagnosis.Enabled && rule.AutoDiagnose {
+			builtJob := r.buildDiagnosisJob(rule, builtIncident, snapshot)
+			diagnosisJob = &builtJob
 		}
 	}
-	if err = r.store.SaveState(ctx, state); err != nil {
+	if err = r.store.CommitEvaluation(ctx, state, incident, diagnosisJob); err != nil {
 		return RuleResult{Rule: rule, Snapshot: snapshot, Abnormal: abnormal, Transition: transition, State: state, Err: err}
 	}
 
@@ -147,6 +153,8 @@ func (r *Runner) buildIncident(rule Rule, snapshot Snapshot, transition string) 
 		Fingerprint:  fingerprint,
 		RuleID:       rule.ID,
 		Domain:       rule.Domain,
+		Service:      rule.Service,
+		Environment:  r.config.Environment,
 		Status:       status,
 		Severity:     rule.Severity,
 		FirstSeenAt:  snapshot.CollectedAt,
@@ -155,6 +163,38 @@ func (r *Runner) buildIncident(rule Rule, snapshot Snapshot, transition string) 
 		LatestValue:  snapshot.Value,
 		EvidenceID:   snapshot.EvidenceID,
 		EvidenceJSON: snapshot.RawOutput,
+	}
+}
+
+func (r *Runner) buildDiagnosisJob(rule Rule, incident Incident, snapshot Snapshot) DiagnosisJob {
+	openedAt := snapshot.CollectedAt.UTC()
+	hash := sha256.Sum256([]byte(incident.Fingerprint + "|" + openedAt.Format(time.RFC3339Nano)))
+	jobID := "diag_" + hex.EncodeToString(hash[:8])
+	return DiagnosisJob{
+		ID:              jobID,
+		IncidentID:      incident.ID,
+		EpisodeOpenedAt: openedAt,
+		Status:          DiagnosisJobPending,
+		NextAttemptAt:   openedAt,
+		ConversationID:  "watch-" + jobID,
+		Request: diagnosis.IncidentDiagnoseRequest{
+			JobID:          jobID,
+			IncidentID:     incident.ID,
+			RuleID:         rule.ID,
+			Domain:         rule.Domain,
+			Service:        rule.Service,
+			Environment:    r.config.Environment,
+			Severity:       rule.Severity,
+			CurrentStatus:  StateFiring,
+			WindowMinutes:  rule.WindowMinutes,
+			Operator:       rule.Operator,
+			Threshold:      rule.Threshold,
+			ObservedValue:  snapshot.Value,
+			ObservedAt:     openedAt,
+			EvidenceID:     snapshot.EvidenceID,
+			DatabaseProbe:  rule.DatabaseProbe.Enabled,
+			DatabaseTarget: rule.DatabaseProbe.Target,
+		},
 	}
 }
 

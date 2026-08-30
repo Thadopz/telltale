@@ -236,7 +236,7 @@ func contextStressToolFixtures(distractorCount int) []ToolFixture {
 				Description: "The ISO-8601 time range to inspect.",
 			},
 		},
-		Output: `{"success":true,"status":"success","evidence_id":"ev_payment_callback_history","can_use_as_evidence":true,"data_status":"present","source_kind":"runtime_log","runtime_verified":true,"subject":{"type":"payment_callback","service":"payment"},"observations":[{"kind":"log_error","subject":{"type":"payment_callback","service":"payment"},"fields":{"error_code":"ERR_PAYMENT_CALLBACK_TIMEOUT","route":"/api/v1/payment/callback","component":"callback worker","worker_state":"disabled","traffic":"external traffic normal"},"summary":"Payment callback timeout was observed while the callback worker was disabled."}],"message":"ERR_PAYMENT_CALLBACK_TIMEOUT observed on /api/v1/payment/callback; callback worker disabled; external traffic normal","summary":"Payment callback failures are associated with a disabled callback worker while external traffic remains normal."}`,
+		Output: `{"protocol_version":"2","status":"success","data_status":"present","evidence":{"evidence_id":"ev_payment_callback_history","provenance":{"source_kind":"runtime_log","runtime_verified":true},"observations":[{"kind":"log_error","subject":{"type":"payment_callback","service":"payment"},"fields":{"error_code":"ERR_PAYMENT_CALLBACK_TIMEOUT","route":"/api/v1/payment/callback","component":"callback worker","worker_state":"disabled","traffic":"external traffic normal"},"summary":"Payment callback timeout was observed while the callback worker was disabled."}]},"summary":"Payment callback failures are associated with a disabled callback worker while external traffic remains normal."}`,
 	})
 
 	for _, group := range contextStressToolGroups {
@@ -268,7 +268,7 @@ func contextStressToolFixtures(distractorCount int) []ToolFixture {
 						Description: "Optional identifier for the selected operational resource.",
 					},
 				},
-				Output: `{"success":true,"status":"success","message":"No anomaly detected for the requested scope.","scope":"production"}`,
+				Output: `{"protocol_version":"2","status":"success","data_status":"empty","summary":"No anomaly detected for the requested scope."}`,
 			})
 		}
 	}

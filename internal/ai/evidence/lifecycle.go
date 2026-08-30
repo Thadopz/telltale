@@ -39,34 +39,35 @@ type IssueMetadata struct {
 // IssueEnvelope gives a successful structured result a local identity. The
 // result may describe its source, but it cannot choose the local evidence ID.
 func IssueEnvelope(env Envelope, metadata IssueMetadata) Envelope {
-	normalize(&env)
-	if env.Status != StatusSuccess || !env.CanUseAsEvidence || len(env.Observations) == 0 {
+	record, ok := env.UsableEvidence()
+	if !ok {
 		return env
 	}
 
-	env.EvidenceID = newID("ev")
-	env.Issuer = strings.TrimSpace(metadata.Issuer)
-	env.RunID = strings.TrimSpace(metadata.RunID)
-	env.ConversationID = strings.TrimSpace(metadata.ConversationID)
-	env.TenantID = strings.TrimSpace(metadata.TenantID)
-	if env.ObservedAt.IsZero() {
-		env.ObservedAt = time.Now().UTC()
+	record.EvidenceID = newID("ev")
+	record.Attestation.Issuer = strings.TrimSpace(metadata.Issuer)
+	record.Attestation.RunID = strings.TrimSpace(metadata.RunID)
+	record.Attestation.ConversationID = strings.TrimSpace(metadata.ConversationID)
+	record.Attestation.TenantID = strings.TrimSpace(metadata.TenantID)
+	if record.Attestation.ObservedAt.IsZero() {
+		record.Attestation.ObservedAt = time.Now().UTC()
 	}
 	if metadata.ExpiresAfter > 0 {
-		expiresAt := env.ObservedAt.Add(metadata.ExpiresAfter)
-		env.ExpiresAt = &expiresAt
+		expiresAt := record.Attestation.ObservedAt.Add(metadata.ExpiresAfter)
+		record.Attestation.ExpiresAt = &expiresAt
 	}
 	if strings.TrimSpace(metadata.TrustLevel) != "" {
-		env.TrustLevel = strings.TrimSpace(metadata.TrustLevel)
+		record.Attestation.IssuerTrust = strings.TrimSpace(metadata.TrustLevel)
 	}
-	if env.TrustLevel == "" {
-		env.TrustLevel = ContentTrustTrustedLocal
+	if record.Attestation.IssuerTrust == "" {
+		record.Attestation.IssuerTrust = ContentTrustTrustedLocal
 	}
-	if env.TrustLevel == ContentTrustUntrustedExternal {
-		env.RuntimeVerified = false
-		env.VersionAlignment = VersionUnknown
+	if record.Attestation.IssuerTrust == ContentTrustUntrustedExternal {
+		record.Provenance.RuntimeVerified = false
+		record.Provenance.VersionAlignment = VersionUnknown
 	}
-	env.ContentDigest = digestEnvelope(env)
+	record.Attestation.DigestVersion = 2
+	record.Attestation.ContentDigest = DigestEvidenceRecord(*record)
 	return env
 }
 
@@ -75,39 +76,75 @@ func IssueEnvelope(env Envelope, metadata IssueMetadata) Envelope {
 // intentionally meant for in-process eval fixtures; production adapters must
 // use IssueEnvelope so external callers cannot choose a local EvidenceID.
 func MarkLocalFixtureEnvelope(env Envelope, metadata IssueMetadata) Envelope {
-	normalize(&env)
-	if env.Status != StatusSuccess || !env.CanUseAsEvidence || len(env.Observations) == 0 {
+	record, ok := env.UsableEvidence()
+	if !ok {
 		return env
 	}
-	env.Issuer = strings.TrimSpace(metadata.Issuer)
-	env.RunID = strings.TrimSpace(metadata.RunID)
-	env.ConversationID = strings.TrimSpace(metadata.ConversationID)
-	env.TenantID = strings.TrimSpace(metadata.TenantID)
-	if env.ObservedAt.IsZero() {
-		env.ObservedAt = time.Now().UTC()
+	record.Attestation.Issuer = strings.TrimSpace(metadata.Issuer)
+	record.Attestation.RunID = strings.TrimSpace(metadata.RunID)
+	record.Attestation.ConversationID = strings.TrimSpace(metadata.ConversationID)
+	record.Attestation.TenantID = strings.TrimSpace(metadata.TenantID)
+	if record.Attestation.ObservedAt.IsZero() {
+		record.Attestation.ObservedAt = time.Now().UTC()
 	}
 	if metadata.ExpiresAfter > 0 {
-		expiresAt := env.ObservedAt.Add(metadata.ExpiresAfter)
-		env.ExpiresAt = &expiresAt
+		expiresAt := record.Attestation.ObservedAt.Add(metadata.ExpiresAfter)
+		record.Attestation.ExpiresAt = &expiresAt
 	}
 	if strings.TrimSpace(metadata.TrustLevel) != "" {
-		env.TrustLevel = strings.TrimSpace(metadata.TrustLevel)
+		record.Attestation.IssuerTrust = strings.TrimSpace(metadata.TrustLevel)
 	}
-	if env.TrustLevel == "" {
-		env.TrustLevel = ContentTrustTrustedLocal
+	if record.Attestation.IssuerTrust == "" {
+		record.Attestation.IssuerTrust = ContentTrustTrustedLocal
 	}
-	if env.TrustLevel == ContentTrustUntrustedExternal {
-		env.RuntimeVerified = false
-		env.VersionAlignment = VersionUnknown
+	if record.Attestation.IssuerTrust == ContentTrustUntrustedExternal {
+		record.Provenance.RuntimeVerified = false
+		record.Provenance.VersionAlignment = VersionUnknown
 	}
-	env.ContentDigest = digestEnvelope(env)
+	record.Attestation.DigestVersion = 2
+	record.Attestation.ContentDigest = DigestEvidenceRecord(*record)
 	return env
 }
 
 func DigestEvidenceItem(item EvidenceItem) string {
-	copyItem := item
-	copyItem.ContentDigest = ""
-	data, err := json.Marshal(copyItem)
+	return DigestEvidenceRecord(EvidenceRecord{
+		EvidenceID: item.EvidenceID,
+		Provenance: Provenance{
+			SourceKind:       item.SourceKind,
+			Repository:       item.Repository,
+			Revision:         item.Revision,
+			SnapshotDigest:   item.SnapshotDigest,
+			VersionAlignment: item.VersionAlignment,
+			RuntimeVerified:  item.RuntimeVerified,
+			PayloadTrust:     item.PayloadTrust,
+		},
+		Attestation: Attestation{
+			Issuer:         item.Issuer,
+			RunID:          item.RunID,
+			ConversationID: item.ConversationID,
+			TenantID:       item.TenantID,
+			ObservedAt:     item.ObservedAt,
+			ExpiresAt:      item.ExpiresAt,
+			ContentDigest:  item.ContentDigest,
+			DigestVersion:  item.DigestVersion,
+			IssuerTrust:    item.IssuerTrust,
+		},
+		ResultMetadata: item.ResultMetadata,
+		Observations:   item.Observations,
+	})
+}
+
+func DigestEvidenceRecord(record EvidenceRecord) string {
+	canonical := struct {
+		Provenance     Provenance     `json:"provenance"`
+		ResultMetadata ResultMetadata `json:"result_metadata"`
+		Observations   []Observation  `json:"observations"`
+	}{
+		Provenance:     record.Provenance,
+		ResultMetadata: record.ResultMetadata,
+		Observations:   record.Observations,
+	}
+	data, err := json.Marshal(canonical)
 	if err != nil {
 		return ""
 	}
@@ -120,16 +157,4 @@ func IsExpired(item EvidenceItem, now time.Time) bool {
 		return false
 	}
 	return !now.Before(*item.ExpiresAt)
-}
-
-func digestEnvelope(env Envelope) string {
-	copyEnv := env
-	copyEnv.EvidenceID = ""
-	copyEnv.ContentDigest = ""
-	data, err := json.Marshal(copyEnv)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }

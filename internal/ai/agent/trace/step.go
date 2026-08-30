@@ -1,13 +1,14 @@
 package trace
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/contextbudget"
-	"github.com/Thadopz/telltale/internal/ai/evidence"
-	"github.com/Thadopz/telltale/internal/observability"
-	"github.com/Thadopz/telltale/utility/mem"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	aimodels "github.com/Thadopz/telltale/internal/ai/models"
+	"github.com/Thadopz/telltale/internal/observability"
+	"github.com/Thadopz/telltale/utility/mem"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,12 @@ type AgentStep struct {
 	Error                 string    `json:"error,omitempty"`
 	ElapsedMS             int64     `json:"elapsed_ms,omitempty"`
 	PromptTokens          int       `json:"prompt_tokens,omitempty"`
+	CachedPromptTokens    int       `json:"cached_prompt_tokens,omitempty"`
+	UncachedPromptTokens  int       `json:"uncached_prompt_tokens,omitempty"`
+	CacheHitRatio         float64   `json:"cache_hit_ratio,omitempty"`
+	ProviderCacheEnabled  bool      `json:"provider_cache_enabled,omitempty"`
+	ProviderCacheFallback bool      `json:"provider_cache_fallback,omitempty"`
+	CacheKeyFingerprint   string    `json:"cache_key_fingerprint,omitempty"`
 	EstimatedPromptTokens int       `json:"estimated_prompt_tokens,omitempty"`
 	CompletionTokens      int       `json:"completion_tokens,omitempty"`
 	TotalTokens           int       `json:"total_tokens,omitempty"`
@@ -62,15 +69,28 @@ type AgentStep struct {
 }
 
 type ToolEvidence struct {
-	ToolName      string            `json:"tool_name"`
-	InputJSON     string            `json:"input_json,omitempty"`
-	OutputJSON    string            `json:"output_json,omitempty"`
-	Envelope      evidence.Envelope `json:"envelope"`
-	EvidenceID    string            `json:"evidence_id,omitempty"`
-	FailedQueryID string            `json:"failed_query_id,omitempty"`
-	Status        string            `json:"status"`
-	Summary       string            `json:"summary,omitempty"`
+	ToolName   string            `json:"tool_name"`
+	InputJSON  string            `json:"input_json,omitempty"`
+	OutputJSON string            `json:"output_json,omitempty"`
+	Envelope   evidence.Envelope `json:"envelope"`
 }
+
+func (item ToolEvidence) EvidenceID() string {
+	if record, ok := item.Envelope.UsableEvidence(); ok {
+		return strings.TrimSpace(record.EvidenceID)
+	}
+	return ""
+}
+
+func (item ToolEvidence) FailedQueryID() string {
+	if item.Envelope.Failure == nil {
+		return ""
+	}
+	return strings.TrimSpace(item.Envelope.Failure.QueryID)
+}
+
+func (item ToolEvidence) Status() string  { return strings.TrimSpace(item.Envelope.Status) }
+func (item ToolEvidence) Summary() string { return strings.TrimSpace(item.Envelope.Summary) }
 
 func (s AgentStep) String() string {
 	b, err := json.Marshal(s)
@@ -153,10 +173,10 @@ func (r *Recorder) ToolEvidence() []ToolEvidence {
 
 func (r *Recorder) QualityCounts() (evidenceCount int, failedToolCount int) {
 	for _, item := range r.ToolEvidence() {
-		if item.EvidenceID != "" {
+		if item.EvidenceID() != "" {
 			evidenceCount++
 		}
-		if item.FailedQueryID != "" || strings.EqualFold(item.Status, "error") {
+		if item.FailedQueryID() != "" || strings.EqualFold(item.Status(), "error") {
 			failedToolCount++
 		}
 	}
@@ -222,16 +242,6 @@ func (r *Recorder) RecordToolEvidence(item ToolEvidence) {
 		return
 	}
 	item.ToolName = strings.TrimSpace(item.ToolName)
-	item.EvidenceID = strings.TrimSpace(item.Envelope.EvidenceID)
-	item.FailedQueryID = strings.TrimSpace(item.Envelope.FailedQueryID)
-	item.Status = strings.TrimSpace(item.Envelope.Status)
-	item.Summary = strings.TrimSpace(item.Envelope.Summary)
-	if item.Summary == "" {
-		item.Summary = strings.TrimSpace(item.Envelope.Message)
-	}
-	if item.Summary == "" {
-		item.Summary = strings.TrimSpace(item.Envelope.Error)
-	}
 	if item.ToolName == "" {
 		return
 	}
@@ -265,17 +275,24 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 
 	builder.OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
 		recordToolOutput(info, output, recorder)
-		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
+		promptTokens, cachedTokens, uncachedTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
+		cacheTrace := aimodels.ProviderCacheTraceFromContext(ctx)
 		step := AgentStep{
-			Agent:            agent,
-			Phase:            "end",
-			Component:        string(info.Component),
-			Type:             info.Type,
-			Name:             info.Name,
-			Output:           compactJSON(output),
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      totalTokens,
+			Agent:                 agent,
+			Phase:                 "end",
+			Component:             string(info.Component),
+			Type:                  info.Type,
+			Name:                  info.Name,
+			Output:                compactJSON(output),
+			PromptTokens:          promptTokens,
+			CachedPromptTokens:    cachedTokens,
+			UncachedPromptTokens:  uncachedTokens,
+			CacheHitRatio:         cacheHitRatio(promptTokens, cachedTokens),
+			ProviderCacheEnabled:  cacheTrace.Enabled,
+			ProviderCacheFallback: cacheTrace.Fallback,
+			CacheKeyFingerprint:   cacheTrace.KeyFingerprint,
+			CompletionTokens:      completionTokens,
+			TotalTokens:           totalTokens,
 		}
 		if info != nil && info.Component == components.ComponentOfChatModel {
 			estimate := recorder.PopModelEstimate(info.Name)
@@ -284,6 +301,7 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 				contextbudget.DefaultCalibrator().Observe(ctx, estimate.modelKey, estimate.estimated, promptTokens)
 			}
 			step.CalibrationFactor = contextbudget.DefaultCalibrator().Factor(ctx, estimate.modelKey)
+			recordModelCacheObservability(ctx, agent, info.Name, false, step)
 		}
 		recorder.Record(step)
 		endComponentSpan(ctx, nil)
@@ -351,17 +369,24 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 			return ctx
 		}
 		recordToolOutput(info, output, recorder)
-		promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
+		promptTokens, cachedTokens, uncachedTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
+		cacheTrace := aimodels.ProviderCacheTraceFromContext(ctx)
 		step := AgentStep{
-			Agent:            agent,
-			Phase:            "end",
-			Component:        string(info.Component),
-			Type:             info.Type,
-			Name:             info.Name,
-			Output:           compactJSON(output),
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      totalTokens,
+			Agent:                 agent,
+			Phase:                 "end",
+			Component:             string(info.Component),
+			Type:                  info.Type,
+			Name:                  info.Name,
+			Output:                compactJSON(output),
+			PromptTokens:          promptTokens,
+			CachedPromptTokens:    cachedTokens,
+			UncachedPromptTokens:  uncachedTokens,
+			CacheHitRatio:         cacheHitRatio(promptTokens, cachedTokens),
+			ProviderCacheEnabled:  cacheTrace.Enabled,
+			ProviderCacheFallback: cacheTrace.Fallback,
+			CacheKeyFingerprint:   cacheTrace.KeyFingerprint,
+			CompletionTokens:      completionTokens,
+			TotalTokens:           totalTokens,
 		}
 		if info.Component == components.ComponentOfChatModel {
 			estimate := recorder.PopModelEstimate(info.Name)
@@ -370,6 +395,7 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 				contextbudget.DefaultCalibrator().Observe(ctx, estimate.modelKey, estimate.estimated, promptTokens)
 			}
 			step.CalibrationFactor = contextbudget.DefaultCalibrator().Factor(ctx, estimate.modelKey)
+			recordModelCacheObservability(ctx, agent, info.Name, true, step)
 		}
 		step = recorder.Record(step)
 		emitTraceStep(info, step, emit)
@@ -405,15 +431,50 @@ func StreamingCallback(agent string, recorder *Recorder, emit func(event string,
 	return builder.Build()
 }
 
-func modelTokenUsage(info *callbacks.RunInfo, output callbacks.CallbackOutput) (int, int, int) {
+func modelTokenUsage(info *callbacks.RunInfo, output callbacks.CallbackOutput) (prompt int, cached int, uncached int, completion int, total int) {
 	if info == nil || info.Component != components.ComponentOfChatModel {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 	modelOutput := model.ConvCallbackOutput(output)
 	if modelOutput == nil || modelOutput.TokenUsage == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
-	return modelOutput.TokenUsage.PromptTokens, modelOutput.TokenUsage.CompletionTokens, modelOutput.TokenUsage.TotalTokens
+	prompt = modelOutput.TokenUsage.PromptTokens
+	cached = modelOutput.TokenUsage.PromptTokenDetails.CachedTokens
+	if cached < 0 {
+		cached = 0
+	}
+	if cached > prompt {
+		cached = prompt
+	}
+	uncached = prompt - cached
+	return prompt, cached, uncached, modelOutput.TokenUsage.CompletionTokens, modelOutput.TokenUsage.TotalTokens
+}
+
+func cacheHitRatio(promptTokens int, cachedTokens int) float64 {
+	if promptTokens <= 0 || cachedTokens <= 0 {
+		return 0
+	}
+	return float64(cachedTokens) / float64(promptTokens)
+}
+
+func recordModelCacheObservability(ctx context.Context, agent string, modelName string, streaming bool, step AgentStep) {
+	cacheSupported := step.CachedPromptTokens > 0 || (step.ProviderCacheEnabled && !step.ProviderCacheFallback)
+	observability.RecordModelCache(ctx, agent, modelName, streaming, step.ProviderCacheEnabled, cacheSupported, step.ProviderCacheFallback, step.PromptTokens, step.CachedPromptTokens, step.UncachedPromptTokens)
+	span, ok := ctx.Value(componentSpanKey{}).(oteltrace.Span)
+	if !ok {
+		return
+	}
+	span.SetAttributes(
+		attribute.Int("model.prompt_tokens", step.PromptTokens),
+		attribute.Int("model.cached_prompt_tokens", step.CachedPromptTokens),
+		attribute.Int("model.uncached_prompt_tokens", step.UncachedPromptTokens),
+		attribute.Float64("model.cache_hit_ratio", step.CacheHitRatio),
+		attribute.Bool("model.cache_enabled", step.ProviderCacheEnabled),
+		attribute.Bool("model.cache_supported", cacheSupported),
+		attribute.Bool("model.cache_fallback", step.ProviderCacheFallback),
+		attribute.String("model.cache_key_fingerprint", step.CacheKeyFingerprint),
+	)
 }
 
 func modelCallbackEstimate(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) (string, int) {

@@ -2,7 +2,6 @@ package evidence
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -138,6 +137,42 @@ type EvidenceProtocolIssue struct {
 	Reason   string `json:"reason"`
 }
 
+// Provenance describes where a batch of observations came from.
+type Provenance struct {
+	SourceKind       EvidenceSourceKind `json:"source_kind,omitempty"`
+	Repository       string             `json:"repository,omitempty"`
+	Revision         string             `json:"revision,omitempty"`
+	SnapshotDigest   string             `json:"snapshot_digest,omitempty"`
+	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
+	RuntimeVerified  bool               `json:"runtime_verified"`
+	PayloadTrust     string             `json:"payload_trust,omitempty"`
+}
+
+// Attestation is local audit metadata. It is retained for verification and
+// persistence, but is intentionally omitted from the model-facing view.
+type Attestation struct {
+	Issuer         string     `json:"issuer,omitempty"`
+	RunID          string     `json:"run_id,omitempty"`
+	ConversationID string     `json:"conversation_id,omitempty"`
+	TenantID       string     `json:"tenant_id,omitempty"`
+	ObservedAt     time.Time  `json:"observed_at,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	ContentDigest  string     `json:"content_digest,omitempty"`
+	DigestVersion  int        `json:"digest_version,omitempty"`
+	IssuerTrust    string     `json:"issuer_trust,omitempty"`
+}
+
+// EvidenceRecord is the canonical structured evidence payload. Subject and
+// scope live on each Observation so mixed tool results cannot inherit the
+// first observation's identity by accident.
+type EvidenceRecord struct {
+	EvidenceID     string         `json:"evidence_id"`
+	Provenance     Provenance     `json:"provenance,omitempty"`
+	Attestation    Attestation    `json:"attestation,omitempty"`
+	ResultMetadata ResultMetadata `json:"result_metadata,omitempty"`
+	Observations   []Observation  `json:"observations"`
+}
+
 type EvidenceItem struct {
 	EvidenceID       string             `json:"evidence_id"`
 	ToolName         string             `json:"tool_name"`
@@ -147,7 +182,7 @@ type EvidenceItem struct {
 	SnapshotDigest   string             `json:"snapshot_digest,omitempty"`
 	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
 	RuntimeVerified  bool               `json:"runtime_verified"`
-	ContentTrust     string             `json:"content_trust,omitempty"`
+	PayloadTrust     string             `json:"payload_trust,omitempty"`
 	Issuer           string             `json:"issuer,omitempty"`
 	RunID            string             `json:"run_id,omitempty"`
 	ConversationID   string             `json:"conversation_id,omitempty"`
@@ -155,14 +190,41 @@ type EvidenceItem struct {
 	ObservedAt       time.Time          `json:"observed_at,omitempty"`
 	ExpiresAt        *time.Time         `json:"expires_at,omitempty"`
 	ContentDigest    string             `json:"content_digest,omitempty"`
-	TrustLevel       string             `json:"trust_level,omitempty"`
-	OperationID      string             `json:"operation_id,omitempty"`
+	DigestVersion    int                `json:"digest_version,omitempty"`
+	IssuerTrust      string             `json:"issuer_trust,omitempty"`
 	ResultMetadata   ResultMetadata     `json:"result_metadata,omitempty"`
-	Scope            EvidenceScope      `json:"scope,omitempty"`
-	Subject          SubjectRef         `json:"subject,omitempty"`
 	Observations     []Observation      `json:"observations"`
-	RawOutput        json.RawMessage    `json:"raw_output,omitempty"`
 	Summary          string             `json:"summary,omitempty"`
+}
+
+// ModelEvidenceView is the deliberate, compact projection exposed to the
+// claim extractor. Audit and tenant identifiers never enter model context.
+type ModelEvidenceView struct {
+	EvidenceID       string             `json:"evidence_id"`
+	ToolName         string             `json:"tool_name"`
+	SourceKind       EvidenceSourceKind `json:"source_kind,omitempty"`
+	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
+	RuntimeVerified  bool               `json:"runtime_verified"`
+	ObservedAt       time.Time          `json:"observed_at,omitempty"`
+	ExpiresAt        *time.Time         `json:"expires_at,omitempty"`
+	ResultMetadata   ResultMetadata     `json:"result_metadata,omitempty"`
+	Observations     []Observation      `json:"observations"`
+	Summary          string             `json:"summary,omitempty"`
+}
+
+func (item EvidenceItem) ModelView() ModelEvidenceView {
+	return ModelEvidenceView{
+		EvidenceID:       item.EvidenceID,
+		ToolName:         item.ToolName,
+		SourceKind:       item.SourceKind,
+		VersionAlignment: item.VersionAlignment,
+		RuntimeVerified:  item.RuntimeVerified,
+		ObservedAt:       item.ObservedAt,
+		ExpiresAt:        item.ExpiresAt,
+		ResultMetadata:   item.ResultMetadata,
+		Observations:     item.Observations,
+		Summary:          item.Summary,
+	}
 }
 
 type FailedQuery struct {

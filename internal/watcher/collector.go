@@ -1,11 +1,11 @@
 package watcher
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/evidence"
-	aitools "github.com/Thadopz/telltale/internal/ai/tools"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
+	aitools "github.com/Thadopz/telltale/internal/ai/tools"
 	"strconv"
 	"strings"
 	"time"
@@ -47,12 +47,16 @@ func (c *ToolCollector) Collect(ctx context.Context, rule Rule, now time.Time) (
 		return Snapshot{}, fmt.Errorf("read sample count for rule %s: %w", rule.ID, err)
 	}
 
+	evidenceID := ""
+	if record, ok := envelope.UsableEvidence(); ok {
+		evidenceID = record.EvidenceID
+	}
 	return Snapshot{
 		RuleID:      rule.ID,
 		CollectedAt: now,
 		Value:       value,
 		SampleCount: sampleCount,
-		EvidenceID:  envelope.EvidenceID,
+		EvidenceID:  evidenceID,
 		RawOutput:   rawOutput,
 	}, nil
 }
@@ -80,7 +84,14 @@ func collectorTool(rule Rule, now time.Time) (tool.InvokableTool, string, error)
 		return candidate, string(arguments), err
 	case CollectorPrometheusAlerts:
 		candidate, err := aitools.NewPrometheusAlertsQueryTool()
-		return candidate, `{}`, err
+		if err != nil {
+			return nil, "", err
+		}
+		arguments, err := json.Marshal(aitools.QueryPrometheusAlertsInput{
+			MatchLabels: rule.MatchLabels,
+			States:      rule.AlertStates,
+		})
+		return candidate, string(arguments), err
 	default:
 		return nil, "", fmt.Errorf("unsupported collector %q", rule.Collector)
 	}

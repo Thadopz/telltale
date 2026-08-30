@@ -2,15 +2,19 @@ package evidence
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
 )
 
 const (
+	ProtocolVersion = "2"
+
 	StatusSuccess          = "success"
 	StatusError            = "error"
 	StatusTimeout          = "timeout"
@@ -24,39 +28,28 @@ const (
 	DataPartial = "partial"
 )
 
+// Envelope is only the wire-level result union. Evidence, failure, and an
+// indeterminate write operation are mutually exclusive payloads.
 type Envelope struct {
-	Success          bool               `json:"success"`
-	Status           string             `json:"status"`
-	EvidenceID       string             `json:"evidence_id,omitempty"`
-	FailedQueryID    string             `json:"failed_query_id,omitempty"`
-	CanUseAsEvidence bool               `json:"can_use_as_evidence"`
-	DataStatus       string             `json:"data_status"`
-	Data             any                `json:"data,omitempty"`
-	SourceKind       EvidenceSourceKind `json:"source_kind,omitempty"`
-	Repository       string             `json:"repository,omitempty"`
-	Revision         string             `json:"revision,omitempty"`
-	SnapshotDigest   string             `json:"snapshot_digest,omitempty"`
-	VersionAlignment VersionAlignment   `json:"version_alignment,omitempty"`
-	RuntimeVerified  bool               `json:"runtime_verified"`
-	ContentTrust     string             `json:"content_trust,omitempty"`
-	Issuer           string             `json:"issuer,omitempty"`
-	RunID            string             `json:"run_id,omitempty"`
-	ConversationID   string             `json:"conversation_id,omitempty"`
-	TenantID         string             `json:"tenant_id,omitempty"`
-	ObservedAt       time.Time          `json:"observed_at,omitempty"`
-	ExpiresAt        *time.Time         `json:"expires_at,omitempty"`
-	ContentDigest    string             `json:"content_digest,omitempty"`
-	TrustLevel       string             `json:"trust_level,omitempty"`
-	OperationID      string             `json:"operation_id,omitempty"`
-	ResultMetadata   ResultMetadata     `json:"result_metadata,omitempty"`
-	Subject          SubjectRef         `json:"subject,omitempty"`
-	Scope            EvidenceScope      `json:"scope,omitempty"`
-	Observations     []Observation      `json:"observations,omitempty"`
-	Error            string             `json:"error,omitempty"`
-	ErrorCode        string             `json:"error_code,omitempty"`
-	FailureReason    string             `json:"failure_reason,omitempty"`
-	Message          string             `json:"message,omitempty"`
-	Summary          string             `json:"summary,omitempty"`
+	ProtocolVersion string          `json:"protocol_version"`
+	Status          string          `json:"status"`
+	DataStatus      string          `json:"data_status"`
+	Data            any             `json:"data,omitempty"`
+	Evidence        *EvidenceRecord `json:"evidence,omitempty"`
+	Failure         *FailureRecord  `json:"failure,omitempty"`
+	Operation       *OperationState `json:"operation,omitempty"`
+	Summary         string          `json:"summary,omitempty"`
+}
+
+type FailureRecord struct {
+	QueryID string `json:"query_id"`
+	Code    string `json:"code"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type OperationState struct {
+	OperationID string `json:"operation_id"`
+	State       string `json:"state"`
 }
 
 type Parsed struct {
@@ -64,48 +57,53 @@ type Parsed struct {
 	IsJSON   bool
 }
 
-func NewData(data any, message string) Envelope {
-	return NewDataWithObservations(data, message, nil)
+func NewData(data any, summary string) Envelope {
+	return NewDataWithObservations(data, summary, nil)
 }
 
-func NewDataWithObservations(data any, message string, observations []Observation) Envelope {
-	dataStatus := DataPresent
-	if isEmptyData(data) {
-		dataStatus = DataEmpty
-	}
+func NewDataWithObservations(data any, summary string, observations []Observation) Envelope {
+	normalized := normalizeObservations(observations)
 	env := Envelope{
-		Success:          true,
-		Status:           StatusSuccess,
-		EvidenceID:       newID("ev"),
-		CanUseAsEvidence: true,
-		DataStatus:       dataStatus,
-		Data:             data,
-		Observations:     normalizeObservations(observations),
-		Message:          message,
-		Summary:          message,
+		ProtocolVersion: ProtocolVersion,
+		Status:          StatusSuccess,
+		DataStatus:      dataStatusFor(data),
+		Data:            data,
+		Summary:         strings.TrimSpace(summary),
 	}
-	env.SourceKind, env.RuntimeVerified = inferSourceMetadata(env.Observations)
-	env.Subject, env.Scope = firstSubjectScope(env.Observations)
+	if len(normalized) == 0 {
+		return env
+	}
+	sourceKind, runtimeVerified := inferSourceMetadata(normalized)
+	env.Evidence = &EvidenceRecord{
+		EvidenceID: newID("ev"),
+		Provenance: Provenance{
+			SourceKind:      sourceKind,
+			RuntimeVerified: runtimeVerified,
+		},
+		Observations: normalized,
+	}
 	return env
 }
 
-func NewDataWithResultMetadata(data any, message string, observations []Observation, metadata ResultMetadata) Envelope {
-	env := NewDataWithObservations(data, message, observations)
-	env.ResultMetadata = metadata
+func NewDataWithResultMetadata(data any, summary string, observations []Observation, metadata ResultMetadata) Envelope {
+	env := NewDataWithObservations(data, summary, observations)
+	if env.Evidence != nil {
+		env.Evidence.ResultMetadata = metadata
+	}
 	if metadata.Truncated {
 		env.DataStatus = DataPartial
 	}
 	return env
 }
 
-func NewError(err error, message string) Envelope {
-	errMsg := ""
+func NewError(err error, summary string) Envelope {
+	detail := ""
 	if err != nil {
-		errMsg = err.Error()
+		detail = err.Error()
 	}
 	status := StatusError
 	code := "ERROR"
-	lower := strings.ToLower(message + " " + errMsg)
+	lower := strings.ToLower(summary + " " + detail)
 	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") {
 		status = StatusTimeout
 		code = "TIMEOUT"
@@ -114,128 +112,198 @@ func NewError(err error, message string) Envelope {
 		status = StatusPermissionDenied
 		code = "PERMISSION_DENIED"
 	}
-	return Envelope{
-		Success:          false,
-		Status:           status,
-		FailedQueryID:    newID("fq"),
-		CanUseAsEvidence: false,
-		DataStatus:       DataUnknown,
-		Error:            errMsg,
-		ErrorCode:        code,
-		Message:          message,
-		Summary:          message,
-	}
+	return newFailure(status, code, detail, summary)
 }
 
 func NewUnstructuredResult(toolName string) Envelope {
+	toolName = strings.TrimSpace(toolName)
+	summary := "tool returned a result that does not conform to evidence protocol v" + ProtocolVersion
+	if toolName != "" {
+		summary = "tool " + toolName + " returned a result that does not conform to evidence protocol v" + ProtocolVersion
+	}
+	return newFailure(StatusProtocolError, "INVALID_TOOL_RESULT", "protocol_version_mismatch", summary)
+}
+
+func NewProtocolError(code, reason, summary string) Envelope {
+	return newFailure(StatusProtocolError, code, reason, summary)
+}
+
+func NewFailure(status, code, reason, summary string) Envelope {
+	switch status {
+	case StatusError, StatusTimeout, StatusPermissionDenied, StatusProtocolError:
+		return newFailure(status, code, reason, summary)
+	default:
+		return NewProtocolError("INVALID_FAILURE_STATUS", status, "invalid failure status")
+	}
+}
+
+func newFailure(status, code, reason, summary string) Envelope {
 	return Envelope{
-		Success:       false,
-		Status:        StatusProtocolError,
-		FailedQueryID: newID("fq"),
-		DataStatus:    DataUnknown,
-		ErrorCode:     "UNSTRUCTURED_TOOL_RESULT",
-		FailureReason: "unstructured_tool_result",
-		Message:       "tool " + strings.TrimSpace(toolName) + " returned an invalid evidence envelope",
-		Summary:       "tool returned an unstructured result",
+		ProtocolVersion: ProtocolVersion,
+		Status:          status,
+		DataStatus:      DataUnknown,
+		Failure: &FailureRecord{
+			QueryID: newID("fq"),
+			Code:    strings.TrimSpace(code),
+			Reason:  strings.TrimSpace(reason),
+		},
+		Summary: strings.TrimSpace(summary),
 	}
 }
 
 // NewUnknownOperation is returned when a write may still be running after a
-// client-side timeout. Callers must query the operation state before retrying.
+// client-side timeout. It is not a failed query and cannot support a claim.
 func NewUnknownOperation(toolName string, operationID string, timeout time.Duration) Envelope {
 	return Envelope{
-		Success:     false,
-		Status:      StatusUnknown,
-		DataStatus:  DataUnknown,
-		OperationID: strings.TrimSpace(operationID),
-		ErrorCode:   "OPERATION_STATE_UNKNOWN",
-		Message:     fmt.Sprintf("write tool %s may still be running after %s; query operation state before retrying", strings.TrimSpace(toolName), timeout),
-		Summary:     "write operation state is unknown after timeout",
+		ProtocolVersion: ProtocolVersion,
+		Status:          StatusUnknown,
+		DataStatus:      DataUnknown,
+		Operation: &OperationState{
+			OperationID: strings.TrimSpace(operationID),
+			State:       StatusUnknown,
+		},
+		Summary: fmt.Sprintf("write tool %s may still be running after %s; query operation state before retrying", strings.TrimSpace(toolName), timeout),
 	}
 }
 
 func Marshal(env Envelope) string {
-	normalize(&env)
-	b, err := json.Marshal(env)
-	if err != nil {
-		fallback := NewError(err, "marshal tool output failed")
-		b, _ = json.Marshal(fallback)
+	if err := env.Validate(); err != nil {
+		env = NewProtocolError("INVALID_RESULT_UNION", err.Error(), "tool produced an invalid evidence protocol result")
 	}
-	return string(b)
+	b, err := json.Marshal(env)
+	if err == nil {
+		return string(b)
+	}
+	fallback, _ := json.Marshal(NewProtocolError("MARSHAL_FAILED", err.Error(), "marshal tool output failed"))
+	return string(fallback)
 }
 
 func Parse(raw string) Parsed {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return Parsed{Envelope: NewError(nil, "empty tool response")}
+		return Parsed{Envelope: NewProtocolError("EMPTY_TOOL_RESULT", "empty_tool_result", "empty tool response")}
 	}
 	var env Envelope
-	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		return Parsed{
-			IsJSON: false,
-			Envelope: Envelope{
-				Success:          true,
-				Status:           StatusSuccess,
-				CanUseAsEvidence: false,
-				DataStatus:       DataUnknown,
-				Message:          truncate(raw, 300),
-				Summary:          truncate(raw, 300),
-			},
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&env); err != nil {
+		if !json.Valid([]byte(raw)) {
+			return protocolGap(raw, "INVALID_TOOL_RESULT", "unstructured_tool_result", "tool result is not valid JSON", false)
 		}
+		return protocolGap(raw, "INVALID_RESULT_UNION", err.Error(), "tool result rejected by evidence protocol v"+ProtocolVersion, true)
 	}
-	normalize(&env)
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return protocolGap(raw, "INVALID_RESULT_UNION", "multiple_json_values", "tool result rejected by evidence protocol v"+ProtocolVersion, true)
+	}
+	if err := env.Validate(); err != nil {
+		return protocolGap(raw, "INVALID_RESULT_UNION", err.Error(), "tool result rejected by evidence protocol v"+ProtocolVersion, true)
+	}
 	return Parsed{Envelope: env, IsJSON: true}
 }
 
-func normalize(env *Envelope) {
-	if env == nil {
-		return
+func protocolGap(raw, code, reason, summary string, isJSON bool) Parsed {
+	env := NewProtocolError(code, reason, summary)
+	digest := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	env.Failure.QueryID = "fq_protocol_" + hex.EncodeToString(digest[:8])
+	return Parsed{Envelope: env, IsJSON: isJSON}
+}
+
+func (env Envelope) Validate() error {
+	if env.ProtocolVersion != ProtocolVersion {
+		return fmt.Errorf("unsupported protocol_version %q", env.ProtocolVersion)
 	}
-	if strings.TrimSpace(env.Status) == "" {
-		if env.Success {
-			env.Status = StatusSuccess
-		} else {
-			env.Status = StatusError
+	if !validDataStatus(env.DataStatus) {
+		return fmt.Errorf("invalid data_status %q", env.DataStatus)
+	}
+	switch env.Status {
+	case StatusSuccess:
+		if env.Failure != nil || env.Operation != nil {
+			return fmt.Errorf("success result cannot contain failure or operation payload")
 		}
-	}
-	env.Status = strings.ToLower(strings.TrimSpace(env.Status))
-	if env.Status == StatusSuccess {
-		env.Success = true
-		if strings.TrimSpace(env.DataStatus) == "" {
-			if isEmptyData(env.Data) {
-				env.DataStatus = DataEmpty
-			} else {
-				env.DataStatus = DataPresent
+		if env.Evidence != nil {
+			if strings.TrimSpace(env.Evidence.EvidenceID) == "" {
+				return fmt.Errorf("evidence payload requires evidence_id")
+			}
+			if len(env.Evidence.Observations) == 0 {
+				return fmt.Errorf("evidence payload requires structured observations")
+			}
+			for _, observation := range env.Evidence.Observations {
+				if !ValidObservation(observation) {
+					return fmt.Errorf("evidence payload contains invalid observation kind %q", observation.Kind)
+				}
 			}
 		}
-		if strings.TrimSpace(env.EvidenceID) == "" {
-			env.CanUseAsEvidence = false
+	case StatusUnknown:
+		if env.Operation == nil || env.Evidence != nil || env.Failure != nil {
+			return fmt.Errorf("unknown result requires only an operation payload")
 		}
-		env.Observations = normalizeObservations(env.Observations)
-		if env.SourceKind == "" {
-			env.SourceKind, env.RuntimeVerified = inferSourceMetadata(env.Observations)
+		if strings.TrimSpace(env.Operation.OperationID) == "" {
+			return fmt.Errorf("operation payload requires operation_id")
 		}
-		if strings.TrimSpace(env.Subject.Service) == "" && strings.TrimSpace(env.Subject.OrderNo) == "" && strings.TrimSpace(env.Subject.TraceID) == "" {
-			env.Subject, env.Scope = firstSubjectScope(env.Observations)
+	case StatusError, StatusTimeout, StatusPermissionDenied, StatusProtocolError:
+		if env.Failure == nil || env.Evidence != nil || env.Operation != nil {
+			return fmt.Errorf("failure result requires only a failure payload")
 		}
-	} else {
-		env.Success = false
-		env.CanUseAsEvidence = false
-		env.EvidenceID = ""
-		env.Observations = nil
-		if strings.TrimSpace(env.FailedQueryID) == "" {
-			env.FailedQueryID = newID("fq")
+		if strings.TrimSpace(env.Failure.QueryID) == "" || strings.TrimSpace(env.Failure.Code) == "" {
+			return fmt.Errorf("failure payload requires query_id and code")
 		}
-		if strings.TrimSpace(env.DataStatus) == "" {
-			env.DataStatus = DataUnknown
-		}
+	default:
+		return fmt.Errorf("invalid status %q", env.Status)
 	}
-	if strings.TrimSpace(env.Summary) == "" {
-		env.Summary = env.Message
+	return nil
+}
+
+func (env Envelope) UsableEvidence() (*EvidenceRecord, bool) {
+	if env.Status != StatusSuccess || env.Evidence == nil || len(env.Evidence.Observations) == 0 {
+		return nil, false
 	}
-	if strings.TrimSpace(env.Summary) == "" && env.Error != "" {
-		env.Summary = env.Error
+	if strings.TrimSpace(env.Evidence.EvidenceID) == "" {
+		return nil, false
 	}
+	return env.Evidence, true
+}
+
+func (env Envelope) ToEvidenceItem(toolName string) (EvidenceItem, bool) {
+	record, ok := env.UsableEvidence()
+	if !ok {
+		return EvidenceItem{}, false
+	}
+	return EvidenceItem{
+		EvidenceID:       record.EvidenceID,
+		ToolName:         strings.TrimSpace(toolName),
+		SourceKind:       record.Provenance.SourceKind,
+		Repository:       record.Provenance.Repository,
+		Revision:         record.Provenance.Revision,
+		SnapshotDigest:   record.Provenance.SnapshotDigest,
+		VersionAlignment: record.Provenance.VersionAlignment,
+		RuntimeVerified:  record.Provenance.RuntimeVerified,
+		PayloadTrust:     record.Provenance.PayloadTrust,
+		Issuer:           record.Attestation.Issuer,
+		RunID:            record.Attestation.RunID,
+		ConversationID:   record.Attestation.ConversationID,
+		TenantID:         record.Attestation.TenantID,
+		ObservedAt:       record.Attestation.ObservedAt,
+		ExpiresAt:        record.Attestation.ExpiresAt,
+		ContentDigest:    record.Attestation.ContentDigest,
+		DigestVersion:    record.Attestation.DigestVersion,
+		IssuerTrust:      record.Attestation.IssuerTrust,
+		ResultMetadata:   record.ResultMetadata,
+		Observations:     append([]Observation(nil), record.Observations...),
+		Summary:          env.Summary,
+	}, true
+}
+
+func (env Envelope) ToFailedQuery(toolName string) (FailedQuery, bool) {
+	if env.Failure == nil || strings.TrimSpace(env.Failure.QueryID) == "" {
+		return FailedQuery{}, false
+	}
+	return FailedQuery{
+		FailedQueryID: env.Failure.QueryID,
+		ToolName:      strings.TrimSpace(toolName),
+		Status:        env.Status,
+		Summary:       env.Summary,
+	}, true
 }
 
 func inferSourceMetadata(observations []Observation) (EvidenceSourceKind, bool) {
@@ -279,21 +347,29 @@ func sourceKindForObservation(kind string) EvidenceSourceKind {
 
 func normalizeObservations(observations []Observation) []Observation {
 	out := make([]Observation, 0, len(observations))
-	for _, obs := range observations {
-		obs.Kind = strings.TrimSpace(obs.Kind)
-		if !ValidObservation(obs) {
-			continue
+	for _, observation := range observations {
+		observation.Kind = strings.TrimSpace(observation.Kind)
+		if ValidObservation(observation) {
+			out = append(out, observation)
 		}
-		out = append(out, obs)
 	}
 	return out
 }
 
-func firstSubjectScope(observations []Observation) (SubjectRef, EvidenceScope) {
-	for _, obs := range observations {
-		return obs.Subject, obs.Scope
+func dataStatusFor(data any) string {
+	if isEmptyData(data) {
+		return DataEmpty
 	}
-	return SubjectRef{}, EvidenceScope{}
+	return DataPresent
+}
+
+func validDataStatus(status string) bool {
+	switch status {
+	case DataPresent, DataEmpty, DataUnknown, DataPartial:
+		return true
+	default:
+		return false
+	}
 }
 
 func isEmptyData(data any) bool {
@@ -315,14 +391,4 @@ func newID(prefix string) string {
 		return fmt.Sprintf("%s_%d_%s", prefix, time.Now().UnixMilli(), hex.EncodeToString(bytes[:]))
 	}
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	if max <= 3 {
-		return s[:max]
-	}
-	return s[:max-3] + "..."
 }

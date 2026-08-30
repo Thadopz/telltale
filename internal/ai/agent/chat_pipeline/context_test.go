@@ -34,8 +34,8 @@ func TestAssembleModelContextBuildsPromptValues(t *testing.T) {
 	if got.DurableMemory != "prefer concise answers" || got.ToolResults != "log query returned 3 rows" {
 		t.Fatalf("expected trimmed memory and tools, got memory=%q tools=%q", got.DurableMemory, got.ToolResults)
 	}
-	if got.Date != "2026-05-21 09:30:00" {
-		t.Fatalf("expected formatted date, got %q", got.Date)
+	if got.CurrentTime != "" {
+		t.Fatalf("knowledge requests must not inject volatile time, got %q", got.CurrentTime)
 	}
 	if strings.Contains(got.RequestAnalysis, "Need Knowledge") || strings.Contains(got.RequestAnalysis, "Knowledge Query") {
 		t.Fatalf("request analysis must not make a static retrieval decision: %q", got.RequestAnalysis)
@@ -43,8 +43,12 @@ func TestAssembleModelContextBuildsPromptValues(t *testing.T) {
 
 	got.ProjectContext = "project rules"
 	values := got.PromptValues()
-	if values["project_context"] != "project rules" || values["request_analysis"] != got.RequestAnalysis {
+	if values["project_context"] != "project rules" {
 		t.Fatalf("unexpected prompt values: %#v", values)
+	}
+	turnContext, ok := values["turn_context"].([]*schema.Message)
+	if !ok || len(turnContext) != 1 || !strings.Contains(turnContext[0].Content, got.RequestAnalysis) {
+		t.Fatalf("expected request analysis in late turn context, got %#v", values["turn_context"])
 	}
 
 	got.History[0].Content = "changed"
@@ -122,12 +126,13 @@ func TestBudgetHistoryMessagesKeepsRecentUserAssistantPair(t *testing.T) {
 }
 
 func TestPreparedModelContextIsReused(t *testing.T) {
-	modelContext := ModelContext{Content: "cached content", RequestAnalysis: "cached analysis", Date: "2026-05-21 09:30:00"}
+	modelContext := ModelContext{Content: "cached content", RequestAnalysis: "cached analysis", CurrentTime: "2026-05-21T09:30:00Z"}
 	got, err := newInputToChatLambda(context.Background(), &UserMessage{Query: "different content", ModelContext: &modelContext})
 	if err != nil {
 		t.Fatalf("input conversion: %v", err)
 	}
-	if got["content"] != "cached content" || got["date"] != "2026-05-21 09:30:00" {
+	turnContext, _ := got["turn_context"].([]*schema.Message)
+	if got["content"] != "cached content" || len(turnContext) != 2 || turnContext[1].Content != "Current time: 2026-05-21T09:30:00Z" {
 		t.Fatalf("expected prepared context, got %#v", got)
 	}
 }
@@ -161,5 +166,14 @@ func TestChatAgentFactoryCacheKeySeparatesRoles(t *testing.T) {
 	oncallKey := factory.cacheKey(authz.WithPrincipal(context.Background(), authz.Principal{UserID: "u2", Roles: []string{"oncall"}}))
 	if viewerKey == oncallKey {
 		t.Fatalf("expected role-specific cache keys, got %q", viewerKey)
+	}
+}
+
+func TestChatAgentFactoryCacheKeySeparatesTenants(t *testing.T) {
+	factory := NewChatAgentFactory()
+	tenantA := factory.cacheKey(authz.WithPrincipal(context.Background(), authz.Principal{TenantID: "tenant-a", Roles: []string{"oncall"}}))
+	tenantB := factory.cacheKey(authz.WithPrincipal(context.Background(), authz.Principal{TenantID: "tenant-b", Roles: []string{"oncall"}}))
+	if tenantA == tenantB {
+		t.Fatalf("expected tenant-specific runner cache keys, got %q", tenantA)
 	}
 }

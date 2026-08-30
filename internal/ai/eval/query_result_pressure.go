@@ -177,7 +177,7 @@ func queryResultPressureOutput(spec QueryResultPressureSpec) string {
 		observations,
 		metadata,
 	)
-	envelope.EvidenceID = "ev_sql_slow_pressure"
+	envelope.Evidence.EvidenceID = "ev_sql_slow_pressure"
 	return evidence.Marshal(envelope)
 }
 
@@ -224,22 +224,23 @@ func (m *queryResultPressureModel) Generate(_ context.Context, messages []*schem
 	if !found {
 		return nil, errors.New("query_result_pressure_result_missing")
 	}
-	if envelope.Status != evidence.StatusSuccess || envelope.EvidenceID == "" {
+	record, ok := envelope.UsableEvidence()
+	if envelope.Status != evidence.StatusSuccess || !ok {
 		return nil, errors.New("query_result_pressure_evidence_missing")
 	}
-	if envelope.DataStatus != evidence.DataPartial || !envelope.ResultMetadata.Truncated {
+	if envelope.DataStatus != evidence.DataPartial || !record.ResultMetadata.Truncated {
 		return nil, errors.New("query_result_pressure_partial_metadata_missing")
 	}
-	if envelope.ResultMetadata.ReturnedRows <= 0 || envelope.ResultMetadata.MaxRows <= 0 {
+	if record.ResultMetadata.ReturnedRows <= 0 || record.ResultMetadata.MaxRows <= 0 {
 		return nil, errors.New("query_result_pressure_row_budget_missing")
 	}
-	if envelope.ResultMetadata.ReturnedRows > 50 || envelope.ResultMetadata.ReturnedBytes > 64*1024 {
+	if record.ResultMetadata.ReturnedRows > 50 || record.ResultMetadata.ReturnedBytes > 64*1024 {
 		return nil, errors.New("query_result_pressure_budget_exceeded")
 	}
-	m.evidenceID = envelope.EvidenceID
-	m.metadata = envelope.ResultMetadata
+	m.evidenceID = record.EvidenceID
+	m.metadata = record.ResultMetadata
 	m.calls++
-	m.answer = fmt.Sprintf("The slow-SQL result is partial top-N evidence: %d rows returned with a %d-row limit and %d-byte result budget. Evidence ID: %s. It must not be interpreted as the complete set of database queries. Next check: inspect active queries and wait events, then correlate with application connection-pool metrics.", envelope.ResultMetadata.ReturnedRows, envelope.ResultMetadata.MaxRows, envelope.ResultMetadata.MaxBytes, envelope.EvidenceID)
+	m.answer = fmt.Sprintf("The slow-SQL result is partial top-N evidence: %d rows returned with a %d-row limit and %d-byte result budget. Evidence ID: %s. It must not be interpreted as the complete set of database queries. Next check: inspect active queries and wait events, then correlate with application connection-pool metrics.", record.ResultMetadata.ReturnedRows, record.ResultMetadata.MaxRows, record.ResultMetadata.MaxBytes, record.EvidenceID)
 	return schema.AssistantMessage(m.answer, nil), nil
 }
 

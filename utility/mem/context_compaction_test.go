@@ -95,7 +95,6 @@ func TestSQLiteContextSnapshotRoundTrip(t *testing.T) {
 	if err := storage.Initialize(ctx); err != nil {
 		t.Fatalf("initialize sqlite storage: %v", err)
 	}
-	defer g.DB().Close(ctx)
 
 	conversationID := "sqlite-compaction-" + time.Now().Format("150405.000000000")
 	memory := &SimpleMemory{

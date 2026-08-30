@@ -7,16 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
-	"github.com/Thadopz/telltale/internal/appconfig"
-	"github.com/Thadopz/telltale/internal/observability"
+	"github.com/Thadopz/telltale/internal/ai/sqlobserve"
+	runtimepkg "github.com/Thadopz/telltale/internal/runtime"
 	"github.com/Thadopz/telltale/internal/watcher"
-	"github.com/Thadopz/telltale/utility/storage"
 )
 
-// RunWatch is shared by telltale watch and watch_cmd. The watcher talks to
-// collectors and SQLite directly; it does not call the HTTP adapter.
+// RunWatch is shared by telltale watch and watch_cmd. It reuses the local
+// runtime and never calls the optional HTTP adapter.
 func RunWatch(ctx context.Context, args []string) error {
 	configDir, commandArgs, err := splitConfigDir(args)
 	if err != nil {
@@ -42,9 +40,6 @@ func runWatch(ctx context.Context, args []string, configDir string, output io.Wr
 
 	ctx = quietCommandContext(ctx)
 	configure(ctx, configDir)
-	if err := appconfig.ValidateRuntimeSecurity(ctx); err != nil {
-		return runtimeError(err)
-	}
 	config, err := watcher.LoadConfig(ctx)
 	if err != nil {
 		return runtimeError(err)
@@ -53,21 +48,34 @@ func runWatch(ctx context.Context, args []string, configDir string, output io.Wr
 		fmt.Fprintln(output, "watch is disabled; set watch.enabled=true in the active config")
 		return nil
 	}
-	if err = storage.Initialize(ctx); err != nil {
-		return runtimeError(err)
-	}
-	shutdown, err := observability.Init(ctx)
+	rt, err := runtimepkg.NewRuntime(ctx)
 	if err != nil {
 		return runtimeError(err)
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = shutdown(shutdownCtx)
-	}()
+	defer func() { _ = runtimepkg.CloseWithTimeout(rt) }()
 
-	runner := watcher.NewRunner(config, watcher.NewToolCollector(), watcher.NewSQLiteStore())
+	store := watcher.NewSQLiteStore()
+	runner := watcher.NewRunner(config, watcher.NewToolCollector(), store)
+	worker := watcher.NewDiagnosisWorker(config, store, rt.Diagnostic)
+	historySampler, err := sqlobserve.NewConfiguredHistorySampler(ctx)
+	if err != nil {
+		return runtimeError(err)
+	}
 	if *runOnce {
+		if rt.Memory != nil {
+			processed, memoryErr := rt.Memory.RunReady(ctx)
+			fmt.Fprintf(output, "memory_buffers_processed=%d error=%v\n", processed, memoryErr)
+			if memoryErr != nil {
+				return runtimeError(memoryErr)
+			}
+		}
+		if historySampler.Enabled() {
+			sampled, sampleErr := historySampler.RunOnce(ctx)
+			fmt.Fprintf(output, "database_history_targets_sampled=%d error=%v\n", sampled, sampleErr)
+			if sampleErr != nil {
+				return runtimeError(sampleErr)
+			}
+		}
 		results, runErr := runner.RunOnce(ctx)
 		for _, result := range results {
 			fmt.Fprintf(output, "rule=%s state=%s abnormal=%t transition=%s value=%v evidence_id=%s error=%v\n",
@@ -80,13 +88,63 @@ func runWatch(ctx context.Context, args []string, configDir string, output io.Wr
 				result.Err,
 			)
 		}
+		if config.Diagnosis.Enabled {
+			processed, workerErr := worker.RunReady(ctx)
+			fmt.Fprintf(output, "diagnosis_jobs_processed=%d error=%v\n", processed, workerErr)
+			if workerErr != nil && runErr == nil {
+				runErr = workerErr
+			}
+		}
 		if runErr != nil {
 			return runtimeError(runErr)
 		}
 		return nil
 	}
 
-	if err = runner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	watchContext, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	var memoryDone chan error
+	if rt.Memory != nil {
+		memoryDone = make(chan error, 1)
+		go func() {
+			memoryDone <- rt.Memory.Run(watchContext)
+		}()
+	}
+	var workerDone chan error
+	if config.Diagnosis.Enabled {
+		workerDone = make(chan error, 1)
+		go func() {
+			workerDone <- worker.Run(watchContext)
+		}()
+	}
+	var samplerDone chan error
+	if historySampler.Enabled() {
+		samplerDone = make(chan error, 1)
+		go func() {
+			samplerDone <- historySampler.Run(watchContext)
+		}()
+	}
+	err = runner.Run(watchContext)
+	stopWatch()
+	if memoryDone != nil {
+		memoryErr := <-memoryDone
+		if memoryErr != nil && !errors.Is(memoryErr, context.Canceled) && err == nil {
+			err = memoryErr
+		}
+	}
+	if workerDone != nil {
+		workerErr := <-workerDone
+		if workerErr != nil && !errors.Is(workerErr, context.Canceled) && err == nil {
+			err = workerErr
+		}
+	}
+	if samplerDone != nil {
+		samplerErr := <-samplerDone
+		if samplerErr != nil && !errors.Is(samplerErr, context.Canceled) && err == nil {
+			err = samplerErr
+		}
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return runtimeError(err)
 	}
 	return nil

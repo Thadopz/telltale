@@ -64,10 +64,10 @@ func TestObserverReturnsPartialStructuredEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query observer: %v", err)
 	}
-	if envelope.Status != evidence.StatusSuccess || len(envelope.Observations) != 1 {
+	if envelope.Status != evidence.StatusSuccess || envelope.Evidence == nil || len(envelope.Evidence.Observations) != 1 {
 		t.Fatalf("expected structured success, got %#v", envelope)
 	}
-	if !envelope.ResultMetadata.Truncated || envelope.DataStatus != evidence.DataPartial {
+	if !envelope.Evidence.ResultMetadata.Truncated || envelope.DataStatus != evidence.DataPartial {
 		t.Fatalf("expected partial result metadata, got %#v", envelope)
 	}
 }
@@ -140,9 +140,9 @@ func TestObserverDistinguishesEmptyPermissionAndUnavailableResults(t *testing.T)
 		wantReason  string
 		wantData    string
 	}{
-		{name: "empty", wantStatus: evidence.StatusSuccess, wantReason: "empty_result", wantData: evidence.DataEmpty},
+		{name: "empty", wantStatus: evidence.StatusSuccess, wantData: evidence.DataEmpty},
 		{name: "permission", executorErr: errors.New("access denied for performance_schema"), wantStatus: evidence.StatusPermissionDenied, wantReason: "permission_denied", wantData: evidence.DataUnknown},
-		{name: "unavailable", executorErr: errors.New("table performance_schema.missing does not exist"), wantStatus: evidence.StatusUnknown, wantReason: "source_unavailable", wantData: evidence.DataUnknown},
+		{name: "unavailable", executorErr: errors.New("table performance_schema.missing does not exist"), wantStatus: evidence.StatusError, wantReason: "source_unavailable", wantData: evidence.DataUnknown},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -156,8 +156,14 @@ func TestObserverDistinguishesEmptyPermissionAndUnavailableResults(t *testing.T)
 			if err != nil {
 				t.Fatalf("query observer: %v", err)
 			}
-			if envelope.Status != test.wantStatus || envelope.FailureReason != test.wantReason || envelope.DataStatus != test.wantData {
+			if envelope.Status != test.wantStatus || envelope.DataStatus != test.wantData {
 				t.Fatalf("unexpected result: %#v", envelope)
+			}
+			if test.wantReason == "" && envelope.Failure != nil {
+				t.Fatalf("plain successful data must not create a failed query: %#v", envelope)
+			}
+			if test.wantReason != "" && (envelope.Failure == nil || envelope.Failure.Reason != test.wantReason) {
+				t.Fatalf("unexpected failure payload: %#v", envelope)
 			}
 		})
 	}
@@ -184,7 +190,7 @@ type fakeExecutor struct {
 	err  error
 }
 
-func (executor fakeExecutor) Query(context.Context, string) ([]map[string]any, error) {
+func (executor fakeExecutor) Query(context.Context, string, ...any) ([]map[string]any, error) {
 	return executor.rows, executor.err
 }
 

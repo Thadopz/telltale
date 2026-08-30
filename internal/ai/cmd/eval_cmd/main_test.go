@@ -1,14 +1,24 @@
 package main
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/eval"
+	"reflect"
 	"testing"
+
+	"github.com/Thadopz/telltale/internal/ai/eval"
 )
 
 func TestDefaultCasesPathUsesSmokeCasesForSmokeMode(t *testing.T) {
 	path := defaultCasesPath(eval.ModeSmoke)
 	if path != "testdata/eval/smoke" {
 		t.Fatalf("expected smoke cases path, got %q", path)
+	}
+}
+
+func TestSplitCaseIDsTrimsAndDropsEmptyValues(t *testing.T) {
+	got := splitCaseIDs(" profile-outage, ,database-slow-query ")
+	want := []string{"profile-outage", "database-slow-query"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("split case ids=%v, want %v", got, want)
 	}
 }
 
@@ -36,5 +46,11 @@ func TestDefaultCasesPathUsesContextStressCasesForContextStressMode(t *testing.T
 func TestRoutingDefaultsToThreeRepetitions(t *testing.T) {
 	if got := defaultRepetitions(eval.ModeRouting); got != 3 {
 		t.Fatalf("expected three routing repetitions, got %d", got)
+	}
+}
+
+func TestEvidenceAblationDefaultsToFiveRepetitions(t *testing.T) {
+	if got := defaultRepetitions(eval.ModeEvidenceAblation); got != 5 {
+		t.Fatalf("expected five evidence ablation repetitions, got %d", got)
 	}
 }

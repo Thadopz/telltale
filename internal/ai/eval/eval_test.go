@@ -71,7 +71,7 @@ func TestContractModelUsesModelStepsInsteadOfExpectedTools(t *testing.T) {
 		},
 		ToolFixtures: []ToolFixture{{
 			Name:   "knowledge_agent",
-			Output: `{"success":true,"status":"success","evidence_id":"ev_runbook","message":"payment runbook evidence"}`,
+			Output: `{"protocol_version":"2","status":"success","data_status":"present","evidence":{"evidence_id":"ev_runbook","provenance":{"source_kind":"static_config","runtime_verified":false},"observations":[{"kind":"runbook_rule","summary":"payment runbook evidence"}]},"summary":"payment runbook evidence"}`,
 		}},
 		Expected: Expected{
 			RequiredAgents:    []string{"knowledge_agent"},

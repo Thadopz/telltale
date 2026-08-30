@@ -79,7 +79,31 @@ func ValidateRuntimeSecurity(ctx context.Context) error {
 	if value, err := g.Cfg().Get(ctx, "runtime.environment"); err == nil && value != nil {
 		environment = strings.ToLower(strings.TrimSpace(value.String()))
 	}
-	return validateRuntimeSecurity(enabled, environment)
+	if err := validateRuntimeSecurity(enabled, environment); err != nil {
+		return err
+	}
+	_, err := EvaluationEvidenceMode(ctx)
+	return err
+}
+
+// EvaluationEvidenceMode returns the guarded evidence ablation mode. Normal
+// runtimes always receive full unless an eval/test config explicitly opts in.
+func EvaluationEvidenceMode(ctx context.Context) (string, error) {
+	environment := "standalone"
+	if value, err := g.Cfg().Get(ctx, "runtime.environment"); err == nil && value != nil {
+		environment = strings.ToLower(strings.TrimSpace(value.String()))
+	}
+	mode := "full"
+	if value, err := g.Cfg().Get(ctx, "evaluation.evidence_mode"); err == nil && value != nil {
+		mode = strings.ToLower(strings.TrimSpace(value.String()))
+	}
+	if err := validateEvidenceModeEnvironment(mode, environment); err != nil {
+		return "", err
+	}
+	if mode == "" {
+		mode = "full"
+	}
+	return mode, nil
 }
 
 func validateRuntimeSecurity(enabled bool, environment string) error {
@@ -89,6 +113,21 @@ func validateRuntimeSecurity(enabled bool, environment string) error {
 	environment = strings.ToLower(strings.TrimSpace(environment))
 	if environment != "test" && environment != "eval" {
 		return fmt.Errorf("permissions.enabled=false is only allowed in test or eval environments")
+	}
+	return nil
+}
+
+func validateEvidenceModeEnvironment(mode string, environment string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" || mode == "full" {
+		return nil
+	}
+	if mode != "visible_unenforced" && mode != "raw_unenforced" {
+		return fmt.Errorf("unsupported evaluation.evidence_mode %q", mode)
+	}
+	environment = strings.ToLower(strings.TrimSpace(environment))
+	if environment != "test" && environment != "eval" {
+		return fmt.Errorf("evaluation.evidence_mode=%s is only allowed in test or eval environments", mode)
 	}
 	return nil
 }

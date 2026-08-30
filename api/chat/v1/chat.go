@@ -143,3 +143,115 @@ type MemoryCandidateRejectReq struct {
 }
 
 type MemoryCandidateRejectRes struct{}
+
+type ProfileItem struct {
+	ID                   int64   `json:"id"`
+	SlotKey              string  `json:"slot_key"`
+	ValueType            string  `json:"value_type"`
+	ValueJSON            string  `json:"value_json"`
+	ValueText            string  `json:"value_text"`
+	Revision             int     `json:"revision"`
+	Status               string  `json:"status"`
+	Confirmation         string  `json:"confirmation"`
+	Confidence           float64 `json:"confidence"`
+	SourceConversationID string  `json:"source_conversation_id"`
+	ValidFrom            string  `json:"valid_from"`
+	ValidUntil           string  `json:"valid_until,omitempty"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+type ProfileCandidateItem struct {
+	ID                   int64   `json:"id"`
+	SlotKey              string  `json:"slot_key"`
+	ValueType            string  `json:"value_type"`
+	ValueJSON            string  `json:"value_json"`
+	ValueText            string  `json:"value_text"`
+	Revision             int     `json:"revision"`
+	Confidence           float64 `json:"confidence"`
+	SourceConversationID string  `json:"source_conversation_id"`
+	ExpiresAt            string  `json:"expires_at"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+type EventItem struct {
+	ID             string   `json:"id"`
+	ConversationID string   `json:"conversation_id"`
+	Summary        string   `json:"summary"`
+	Tags           []string `json:"tags"`
+	Entities       []string `json:"entities"`
+	RecordedAt     string   `json:"recorded_at"`
+	OccurredAt     string   `json:"occurred_at,omitempty"`
+	TimeConfidence string   `json:"time_confidence"`
+	EvidenceIDs    []string `json:"evidence_ids"`
+	EvidenceStatus string   `json:"evidence_status"`
+	Status         string   `json:"status"`
+}
+
+type ProfileListReq struct {
+	g.Meta `path:"/profiles" method:"get" summary:"List current profile slots"`
+	Limit  int `in:"query" json:"limit"`
+}
+
+type ProfileListRes struct {
+	Items []ProfileItem `json:"items"`
+}
+
+type ProfileDeleteReq struct {
+	g.Meta    `path:"/profiles/{ProfileId}" method:"delete" summary:"Delete a profile revision"`
+	ProfileId int64 `in:"path" json:"profileId"`
+	Revision  int   `in:"query" json:"revision"`
+}
+
+type ProfileDeleteRes struct{}
+
+type ProfileCandidateListReq struct {
+	g.Meta `path:"/profile_candidates" method:"get" summary:"List pending profile candidates"`
+	Limit  int `in:"query" json:"limit"`
+}
+
+type ProfileCandidateListRes struct {
+	Items []ProfileCandidateItem `json:"items"`
+}
+
+type ProfileCandidateConfirmReq struct {
+	g.Meta      `path:"/profile_candidates/{CandidateId}/confirm" method:"post" summary:"Confirm a profile candidate"`
+	CandidateId int64 `in:"path" json:"candidateId"`
+	Revision    int   `json:"revision"`
+}
+
+type ProfileCandidateConfirmRes struct {
+	Profile ProfileItem `json:"profile"`
+}
+
+type ProfileCandidateRejectReq struct {
+	g.Meta      `path:"/profile_candidates/{CandidateId}/reject" method:"post" summary:"Reject a profile candidate"`
+	CandidateId int64 `in:"path" json:"candidateId"`
+	Revision    int   `json:"revision"`
+}
+
+type ProfileCandidateRejectRes struct{}
+
+type EventListReq struct {
+	g.Meta `path:"/events" method:"get" summary:"List memory events"`
+	Limit  int `in:"query" json:"limit"`
+}
+
+type EventListRes struct {
+	Items []EventItem `json:"items"`
+}
+
+type EventDeleteReq struct {
+	g.Meta  `path:"/events/{EventId}" method:"delete" summary:"Delete a memory event"`
+	EventId string `in:"path" json:"eventId"`
+}
+
+type EventDeleteRes struct{}
+
+type MemoryBufferFlushReq struct {
+	g.Meta         `path:"/memory/buffers/{ConversationId}/flush" method:"post" summary:"Flush a conversation memory buffer"`
+	ConversationId string `in:"path" json:"conversationId"`
+}
+
+type MemoryBufferFlushRes struct {
+	Status string `json:"status"`
+}

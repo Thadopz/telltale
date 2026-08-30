@@ -26,6 +26,11 @@ observability:
 runtime:
   environment: "standalone"
 
+# Evidence ablation is an evaluation-only escape hatch. The two unenforced
+# values are rejected unless runtime.environment is explicitly eval or test.
+evaluation:
+  evidence_mode: "full"
+
 agent:
   invoke_model_retries: 1
   failover:
@@ -33,6 +38,16 @@ agent:
   tool_search:
     enabled: true
     min_tools: 8
+
+# Optional request hints for provider-managed prompt/KV caching. Keep disabled
+# unless the configured OpenAI-compatible endpoint accepts the selected field.
+provider_cache:
+  enabled: false
+  key_field: "prompt_cache_key"
+  key_prefix: "telltale"
+  cache_version: "1"
+  extra_fields: {}
+  fail_open: true
 
 context:
   # Optional legacy hard cap. Leave at zero to use the model-aware budget.
@@ -56,7 +71,25 @@ database:
   # Optional business-database observation targets. Telltale's own SQLite
   # state is configured separately under storage.sqlite_path.
   default_target: ""
+  observation_history:
+    enabled: false
+    sample_interval_seconds: 60
+    retention_hours: 48
+    max_statements_per_sample: 50
+    default_window_minutes: 30
+    max_window_hours: 24
   targets: {}
+  # PostgreSQL history is sampled only while `telltale watch` is running:
+  # targets:
+  #   card_service_primary:
+  #     type: "postgresql"
+  #     host: "127.0.0.1"
+  #     port: "5432"
+  #     name: "card_service"
+  #     user: "telltale_reader"
+  #     pass: "YOUR_DATABASE_PASSWORD"
+  #     sslmode: "disable"
+  #     history_enabled: true
 
 storage:
   sqlite_path: "data/telltale.db"
@@ -111,6 +144,29 @@ durable_memory:
   extraction_timeout_seconds: 8
   min_confidence: 0.8
   duplicate_similarity: 0.90
+
+# Profile/Event memory is introduced in shadow mode so extraction quality and
+# cost can be measured before it is allowed to affect model context.
+memory:
+  mode: "shadow" # off | shadow | active
+  buffer:
+    trigger_tokens: 1024
+    max_batch_tokens: 4096
+    idle_flush_minutes: 30
+  worker:
+    poll_seconds: 15
+    lease_seconds: 60
+    extraction_timeout_seconds: 30
+    max_attempts: 5
+  profile:
+    candidate_ttl_days: 30
+  event:
+    active_days: 30
+    retention_days: 180
+    max_per_user: 5000
+  context:
+    max_content_ratio: 0.20
+    profile_ratio: 0.40
 
 knowledge_retrieval:
   hybrid_candidates: 12
@@ -186,6 +242,11 @@ watch:
   query_timeout_seconds: 15
   tenant_id: "default"
   environment: "local"
+  diagnosis:
+    enabled: false
+    poll_interval_seconds: 2
+    run_timeout_seconds: 300
+    retry_delays_seconds: [30, 120, 600]
   rules:
     - id: "payment-success-rate"
       domain: "payment"
@@ -225,6 +286,26 @@ watch:
       severity: "critical"
       firing_windows: 2
       recovery_windows: 2
+      auto_diagnose: false
+    - id: "card-service-active-alerts"
+      domain: "observability"
+      collector: "prometheus_alerts"
+      service: "card-service"
+      window_minutes: 5
+      value_path: "alerts"
+      match_labels:
+        service: "card-service"
+      alert_states:
+        - "firing"
+      operator: "count_gt"
+      threshold: 0
+      severity: "critical"
+      firing_windows: 2
+      recovery_windows: 2
+      auto_diagnose: true
+      database_probe:
+        enabled: false
+        target: "card_service_primary"
 
 permissions:
   enabled: true

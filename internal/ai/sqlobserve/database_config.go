@@ -8,6 +8,17 @@ import (
 	"github.com/gogf/gf/v2/frame/g"
 )
 
+func ConfiguredTargetEngine(ctx context.Context, target string) (DatabaseEngine, error) {
+	engine, err := configuredDatabaseEngine(ctx, target)
+	if err != nil {
+		return EngineUnknown, err
+	}
+	if engine == EngineUnknown {
+		return engine, fmt.Errorf("database target %q is not configured with a supported engine", target)
+	}
+	return engine, nil
+}
+
 func configuredAdapterForTarget(ctx context.Context, target string) (DatabaseAdapter, error) {
 	engine, err := configuredDatabaseEngine(ctx, target)
 	if err != nil {
@@ -16,7 +27,9 @@ func configuredAdapterForTarget(ctx context.Context, target string) (DatabaseAda
 	switch engine {
 	case EngineMySQL:
 		return newMysqlAdapter(), nil
-	case EnginePostgreSQL, EngineSQLite, EngineUnknown:
+	case EnginePostgreSQL:
+		return newPostgreSQLAdapter(), nil
+	case EngineSQLite, EngineUnknown:
 		return unsupportedAdapter{engine: engine}, nil
 	default:
 		return unsupportedAdapter{engine: EngineUnknown}, nil

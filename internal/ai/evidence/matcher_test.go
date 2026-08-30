@@ -249,7 +249,6 @@ func TestMatcherReturnsConflictWhenFieldValuesDisagree(t *testing.T) {
 			SourceKind:      SourceRuntimeDB,
 			RuntimeVerified: true,
 			ObservedAt:      time.Now().UTC(),
-			Subject:         SubjectRef{Service: "payment"},
 			Observations: []Observation{{
 				Kind:    ObservationOrderState,
 				Subject: SubjectRef{Service: "payment"},
@@ -301,8 +300,7 @@ func TestMatcherRejectsReferencedEvidenceOutsideClaimScope(t *testing.T) {
 			SourceKind:      SourceRuntimeLog,
 			RuntimeVerified: true,
 			ObservedAt:      time.Now().UTC(),
-			Scope:           EvidenceScope{Fields: map[string]string{"environment": "staging"}},
-			Observations:    []Observation{{Kind: ObservationLogError}},
+			Observations:    []Observation{{Kind: ObservationLogError, Scope: EvidenceScope{Fields: map[string]string{"environment": "staging"}}}},
 		}},
 		nil,
 	)
@@ -400,6 +398,44 @@ func TestClaimSetRejectsInvalidTypedField(t *testing.T) {
 	}
 }
 
+func TestMetricValueClaimFieldIsNumeric(t *testing.T) {
+	claimSet := ClaimSet{
+		SchemaVersion: ClaimSchemaVersion,
+		Claims: []CandidateClaim{{
+			ClaimID:       "metric-number",
+			ClaimType:     ClaimMetricValue,
+			AssertionKind: AssertionFact,
+			Fields:        map[string]any{"metric_value": 0.92},
+		}},
+	}
+	if err := ValidateClaimSet(claimSet); err != nil {
+		t.Fatalf("numeric metric value should be valid: %v", err)
+	}
+	claimSet.Claims[0].Fields["metric_value"] = "high"
+	if err := ValidateClaimSet(claimSet); err == nil {
+		t.Fatal("non-numeric metric value should be rejected")
+	}
+}
+
+func TestSlowSQLClaimAcceptsSampledHistoryFields(t *testing.T) {
+	claimSet := ClaimSet{
+		SchemaVersion: ClaimSchemaVersion,
+		Claims: []CandidateClaim{{
+			ClaimID:       "sampled-slow-sql",
+			ClaimType:     ClaimSlowSQL,
+			AssertionKind: AssertionFact,
+			Fields: map[string]any{
+				"fingerprint":     "select_card_by_user",
+				"mean_latency_ms": 2450.0,
+				"calls":           318.0,
+			},
+		}},
+	}
+	if err := ValidateClaimSet(claimSet); err != nil {
+		t.Fatalf("sampled slow SQL fields should be valid: %v", err)
+	}
+}
+
 func TestClaimSchemaRestrictsAssertionByClaimType(t *testing.T) {
 	staticClaim := ClaimSet{
 		SchemaVersion: ClaimSchemaVersion,
@@ -444,7 +480,6 @@ func paymentEvidence(id string, kind string) EvidenceItem {
 		SourceKind:      runtimeSourceForObservation(kind),
 		RuntimeVerified: true,
 		ObservedAt:      time.Now().UTC(),
-		Subject:         SubjectRef{Type: "payment", Service: "payment"},
 		Observations:    []Observation{{Kind: kind, Subject: SubjectRef{Type: "payment", Service: "payment"}, Summary: kind}},
 	}
 }
@@ -456,7 +491,6 @@ func genericEvidence(id string, kind string) EvidenceItem {
 		SourceKind:      runtimeSourceForObservation(kind),
 		RuntimeVerified: true,
 		ObservedAt:      time.Now().UTC(),
-		Subject:         SubjectRef{Type: "service", Service: "catalog"},
 		Observations:    []Observation{{Kind: kind, Subject: SubjectRef{Type: "service", Service: "catalog"}, Summary: kind}},
 	}
 }

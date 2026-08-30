@@ -61,7 +61,7 @@ func TestInvokeToolWithTimeoutReturnsStructuredTimeout(t *testing.T) {
 	if env.Status != evidence.StatusTimeout {
 		t.Fatalf("expected timeout status, got %#v", env)
 	}
-	if env.ErrorCode != "TIMEOUT" {
+	if env.Failure == nil || env.Failure.Code != "TIMEOUT" {
 		t.Fatalf("expected TIMEOUT error code, got %#v", env)
 	}
 }
@@ -124,11 +124,11 @@ func TestWriteTimeoutReturnsUnknownOperationState(t *testing.T) {
 		OperationAware: true,
 	}, "op-timeout-1")
 	env := evidence.Parse(output).Envelope
-	if env.Status != evidence.StatusUnknown || env.OperationID != "op-timeout-1" {
+	if env.Status != evidence.StatusUnknown || env.Operation == nil || env.Operation.OperationID != "op-timeout-1" {
 		t.Fatalf("expected unknown write operation state, got %#v", env)
 	}
-	if env.ErrorCode != "OPERATION_STATE_UNKNOWN" {
-		t.Fatalf("expected operation-state error code, got %#v", env)
+	if env.Failure != nil {
+		t.Fatalf("unknown operation must not be represented as a failed query, got %#v", env)
 	}
 }
 
@@ -163,7 +163,7 @@ func TestWriteTimeoutDoesNotWaitForBackgroundOperation(t *testing.T) {
 		t.Fatal("write tool was not started")
 	}
 	env := evidence.Parse(output).Envelope
-	if env.Status != evidence.StatusUnknown || env.OperationID != "op-timeout-2" {
+	if env.Status != evidence.StatusUnknown || env.Operation == nil || env.Operation.OperationID != "op-timeout-2" {
 		t.Fatalf("expected unknown operation state, got %#v", env)
 	}
 	close(release)

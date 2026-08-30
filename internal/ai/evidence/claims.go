@@ -69,6 +69,7 @@ var allowedClaimFields = map[string]bool{
 	"external_service":               true,
 	"environment":                    true,
 	"failure_rate":                   true,
+	"fingerprint":                    true,
 	"function":                       true,
 	"image_digest":                   true,
 	"impact_scope":                   true,
@@ -76,6 +77,7 @@ var allowedClaimFields = map[string]bool{
 	"line":                           true,
 	"match_kind":                     true,
 	"mechanism":                      true,
+	"mean_latency_ms":                true,
 	"message":                        true,
 	"method":                         true,
 	"metric":                         true,
@@ -87,16 +89,23 @@ var allowedClaimFields = map[string]bool{
 	"reason":                         true,
 	"route":                          true,
 	"rows_examined":                  true,
+	"rows":                           true,
 	"runtime_path":                   true,
 	"service":                        true,
 	"sql":                            true,
 	"sql_digest":                     true,
+	"statement_fingerprint":          true,
 	"start_line":                     true,
 	"status":                         true,
 	"status_distribution":            true,
 	"symbol":                         true,
 	"threshold":                      true,
 	"traffic":                        true,
+	"calls":                          true,
+	"exec_count":                     true,
+	"avg_exec_ms":                    true,
+	"total_exec_ms":                  true,
+	"rows_processed":                 true,
 	"value":                          true,
 	"window":                         true,
 	"worker_state":                   true,
@@ -124,12 +133,12 @@ var allowedClaimFields = map[string]bool{
 }
 
 var claimTypeFields = map[string][]string{
-	ClaimMetricAnomaly:      {"metric", "metric_name", "metric_value", "metric_anomaly", "baseline", "threshold", "window", "service", "environment", "value", "current_value"},
-	ClaimMetricValue:        {"metric", "metric_name", "metric_value", "baseline", "threshold", "window", "service", "environment", "value", "current_value"},
+	ClaimMetricAnomaly:      {"metric", "metric_name", "metric_value", "metric_anomaly", "baseline", "threshold", "window", "service", "environment", "value", "current_value", "failure_rate", "rate", "count", "status", "external_service"},
+	ClaimMetricValue:        {"metric", "metric_name", "metric_value", "baseline", "threshold", "window", "service", "environment", "value", "current_value", "failure_rate", "rate", "count", "status", "external_service"},
 	ClaimLogError:           {"error_code", "error_message", "message", "route", "endpoint", "component", "service", "environment", "log_error"},
 	ClaimStatusDistribution: {"status_distribution", "status", "count", "rate", "window", "service", "environment"},
 	ClaimStateMismatch:      {"actual_state", "expected_state", "current_value", "baseline", "status", "order_state", "service", "environment"},
-	ClaimSlowSQL:            {"sql", "sql_digest", "duration_ms", "rows_examined", "threshold", "service", "environment"},
+	ClaimSlowSQL:            {"sql", "sql_digest", "fingerprint", "statement_fingerprint", "duration_ms", "mean_latency_ms", "avg_exec_ms", "total_exec_ms", "calls", "exec_count", "rows", "rows_examined", "rows_processed", "count", "threshold", "service", "environment"},
 	ClaimRunbookRule:        {"reason", "mechanism", "message", "runbook_rule", "service", "environment"},
 
 	ClaimPaymentMetricAbnormal:     {"metric", "metric_name", "metric_value", "metric_anomaly", "payment_metric_anomaly", "baseline", "threshold", "window", "service", "environment", "value", "current_value"},
@@ -322,7 +331,8 @@ func typedClaimFields() map[string]FieldSchema {
 		fields[name] = FieldSchema{Name: name, Type: FieldValueString}
 	}
 	for _, name := range []string{
-		"count", "duration_ms", "failure_rate", "orders_affected", "rows_examined", "start_line", "end_line", "threshold", "value", "rate", "current_value", "baseline",
+		"count", "duration_ms", "failure_rate", "metric_value", "orders_affected", "rows_examined", "start_line", "end_line", "threshold", "value", "rate", "current_value", "baseline",
+		"mean_latency_ms", "avg_exec_ms", "total_exec_ms", "calls", "exec_count", "rows", "rows_processed",
 	} {
 		fields[name] = FieldSchema{Name: name, Type: FieldValueNumber}
 	}

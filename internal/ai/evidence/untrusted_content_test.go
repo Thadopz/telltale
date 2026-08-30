@@ -50,10 +50,10 @@ func TestSanitizeUntrustedEnvelopePreservesEvidenceShape(t *testing.T) {
 		}},
 	)
 	sanitized := SanitizeUntrustedEnvelope(envelope)
-	if sanitized.EvidenceID == "" || len(sanitized.Observations) != 1 {
+	if sanitized.Evidence == nil || sanitized.Evidence.EvidenceID == "" || len(sanitized.Evidence.Observations) != 1 {
 		t.Fatalf("sanitization changed structured evidence shape: %#v", sanitized)
 	}
-	if strings.Contains(sanitized.Observations[0].Fields["instruction"].(string), "ignore previous instructions") {
+	if strings.Contains(sanitized.Evidence.Observations[0].Fields["instruction"].(string), "ignore previous instructions") {
 		t.Fatalf("instruction-shaped observation field was not sanitized: %#v", sanitized)
 	}
 }

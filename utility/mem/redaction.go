@@ -1,8 +1,8 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"encoding/json"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"regexp"
 	"strings"
 )
@@ -32,16 +32,18 @@ func redactToolOutput(raw string) string {
 	}
 	env := parsed.Envelope
 	env.Data = nil
-	env.Message = redactText(env.Message)
-	env.Error = redactText(env.Error)
 	env.Summary = redactText(env.Summary)
-	env.Subject.Fields = redactStringMap(env.Subject.Fields)
-	env.Scope.Fields = redactStringMap(env.Scope.Fields)
-	for index := range env.Observations {
-		env.Observations[index].Subject.Fields = redactStringMap(env.Observations[index].Subject.Fields)
-		env.Observations[index].Scope.Fields = redactStringMap(env.Observations[index].Scope.Fields)
-		env.Observations[index].Fields = redactAnyMap(env.Observations[index].Fields)
-		env.Observations[index].Summary = redactText(env.Observations[index].Summary)
+	if env.Failure != nil {
+		env.Failure.Reason = redactText(env.Failure.Reason)
+	}
+	if env.Evidence == nil {
+		return evidence.Marshal(env)
+	}
+	for index := range env.Evidence.Observations {
+		env.Evidence.Observations[index].Subject.Fields = redactStringMap(env.Evidence.Observations[index].Subject.Fields)
+		env.Evidence.Observations[index].Scope.Fields = redactStringMap(env.Evidence.Observations[index].Scope.Fields)
+		env.Evidence.Observations[index].Fields = redactAnyMap(env.Evidence.Observations[index].Fields)
+		env.Evidence.Observations[index].Summary = redactText(env.Evidence.Observations[index].Summary)
 	}
 	return evidence.Marshal(env)
 }

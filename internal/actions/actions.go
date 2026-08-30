@@ -270,9 +270,11 @@ func Execute(ctx context.Context, token string, toolName string, argumentsJSON s
 		return ExecuteResult{ToolName: toolName, OperationID: operationID, ArgumentsHash: action.ArgumentsHash, Status: string(operation.Status)}, err
 	}
 	parsed := evidence.Parse(out).Envelope
-	operation.EvidenceID = parsed.EvidenceID
+	if record, ok := parsed.UsableEvidence(); ok {
+		operation.EvidenceID = record.EvidenceID
+	}
 	operation.ResultSummary = parsed.Summary
-	if parsed.Status == evidence.StatusUnknown || parsed.ErrorCode == "OPERATION_STATE_UNKNOWN" {
+	if parsed.Status == evidence.StatusUnknown {
 		operation.Status = OperationUnknown
 	} else if parsed.Status == evidence.StatusSuccess {
 		operation.Status = OperationComplete

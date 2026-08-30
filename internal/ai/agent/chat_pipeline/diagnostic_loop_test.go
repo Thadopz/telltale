@@ -26,6 +26,24 @@ func TestBuildDiagnosticStateAddsResourceHypothesisForPoolQuestion(t *testing.T)
 	}
 }
 
+func TestObservabilityIncidentStateUsesOnlyPrometheusCheck(t *testing.T) {
+	state := BuildDiagnosticStateForDomain("system generated incident", "observability")
+	foundPrometheus := false
+	for _, hypothesis := range state.Hypotheses {
+		for _, check := range hypothesis.Checks {
+			if check.ToolName == "query_prometheus_alerts" {
+				foundPrometheus = true
+			}
+			if strings.Contains(check.ToolName, "payment") {
+				t.Fatalf("observability state contains payment check: %#v", check)
+			}
+		}
+	}
+	if !foundPrometheus {
+		t.Fatalf("observability state has no Prometheus check: %#v", state)
+	}
+}
+
 func TestUpdateDiagnosticStateDoesNotTreatFailedQueryAsRefutation(t *testing.T) {
 	state := BuildDiagnosticState("Why are payment callbacks failing?")
 	failed := trace.ToolEvidence{

@@ -49,6 +49,11 @@ func initialize(ctx context.Context) error {
 	})
 
 	db := g.DB()
+	for _, statement := range []string{"PRAGMA busy_timeout = 5000", "PRAGMA journal_mode = WAL"} {
+		if _, err := db.Exec(ctx, statement); err != nil {
+			return fmt.Errorf("configure sqlite concurrency: %w", err)
+		}
+	}
 	for _, statement := range schemaStatements() {
 		if _, err := db.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("initialize sqlite schema: %w", err)
@@ -116,8 +121,13 @@ func applySchemaMigrations(ctx context.Context, db gdb.DB) error {
 			`ALTER TABLE pending_actions ADD COLUMN operation_id TEXT`,
 			`CREATE INDEX IF NOT EXISTS idx_pending_actions_operation_id ON pending_actions(operation_id)`,
 		},
+		4: diagnosisJobSchemaStatements(),
+		5: databaseObservationSchemaStatements(),
+		// Replaying the idempotent standalone schema lets an older database
+		// receive every Profile/Event/Buffer table without destructive ALTERs.
+		6: schemaStatements(),
 	}
-	for version := current + 1; version <= 3; version++ {
+	for version := current + 1; version <= 6; version++ {
 		for _, statement := range migrations[version] {
 			if _, err := db.Exec(ctx, statement); err != nil && !isDuplicateColumnError(err) {
 				return fmt.Errorf("apply sqlite migration %d: %w", version, err)
@@ -338,6 +348,113 @@ func schemaStatements() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_durable_memory_vectors_scope ON durable_memory_vectors(user_id, memory_key, status)`,
+		`CREATE TABLE IF NOT EXISTS profile_slots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			slot_key TEXT NOT NULL,
+			value_type TEXT NOT NULL,
+			value_json TEXT NOT NULL,
+			value_text TEXT NOT NULL,
+			revision INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			confirmation TEXT NOT NULL,
+			confidence REAL NOT NULL,
+			source_conversation_id TEXT NOT NULL DEFAULT '',
+			source_turn_ids TEXT NOT NULL DEFAULT '[]',
+			source_excerpt TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			valid_from DATETIME NOT NULL,
+			valid_until DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, user_id, slot_key, revision)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_profile_slots_scope_status ON profile_slots(tenant_id, user_id, status, slot_key)`,
+		`CREATE TABLE IF NOT EXISTS profile_candidates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			slot_key TEXT NOT NULL,
+			value_type TEXT NOT NULL,
+			value_json TEXT NOT NULL,
+			value_text TEXT NOT NULL,
+			revision INTEGER NOT NULL,
+			confidence REAL NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			source_conversation_id TEXT NOT NULL DEFAULT '',
+			source_turn_ids TEXT NOT NULL DEFAULT '[]',
+			source_excerpt TEXT NOT NULL DEFAULT '',
+			source_hash TEXT NOT NULL DEFAULT '',
+			expires_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, user_id, slot_key, revision)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_profile_candidates_scope_status ON profile_candidates(tenant_id, user_id, status, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS memory_events (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL,
+			incident_id TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL,
+			tags_json TEXT NOT NULL DEFAULT '[]',
+			entities_json TEXT NOT NULL DEFAULT '[]',
+			source_turn_ids TEXT NOT NULL DEFAULT '[]',
+			source_hash TEXT NOT NULL,
+			time_expression TEXT NOT NULL DEFAULT '',
+			time_confidence TEXT NOT NULL DEFAULT 'unknown',
+			occurred_at DATETIME,
+			recorded_at DATETIME NOT NULL,
+			profile_delta_ids TEXT NOT NULL DEFAULT '[]',
+			evidence_ids TEXT NOT NULL DEFAULT '[]',
+			evidence_status TEXT NOT NULL DEFAULT 'unverified',
+			status TEXT NOT NULL,
+			vector_status TEXT NOT NULL DEFAULT 'pending',
+			vector TEXT NOT NULL DEFAULT '',
+			mention_count INTEGER NOT NULL DEFAULT 1,
+			extractor_version TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			expires_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, user_id, idempotency_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_events_scope_time ON memory_events(tenant_id, user_id, status, recorded_at)`,
+		`CREATE TABLE IF NOT EXISTS memory_buffers (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL,
+			conversation_storage_id TEXT NOT NULL,
+			pending_turn_ids TEXT NOT NULL DEFAULT '[]',
+			claimed_turn_ids TEXT NOT NULL DEFAULT '[]',
+			pending_tokens INTEGER NOT NULL DEFAULT 0,
+			claimed_tokens INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'pending',
+			explicit_flush INTEGER NOT NULL DEFAULT 0,
+			generation INTEGER NOT NULL DEFAULT 0,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			lease_until DATETIME,
+			last_activity_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, user_id, conversation_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_buffers_ready ON memory_buffers(status, next_attempt_at, last_activity_at)`,
+		`CREATE TABLE IF NOT EXISTS memory_forget_tombstones (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			scope_kind TEXT NOT NULL,
+			scope_value TEXT NOT NULL DEFAULT '',
+			generation INTEGER NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_tombstones_scope ON memory_forget_tombstones(tenant_id, user_id, generation)`,
 		`CREATE TABLE IF NOT EXISTS detector_states (
 			state_key TEXT PRIMARY KEY,
 			rule_id TEXT NOT NULL,
@@ -354,6 +471,8 @@ func schemaStatements() []string {
 			fingerprint TEXT NOT NULL UNIQUE,
 			rule_id TEXT NOT NULL,
 			domain TEXT NOT NULL,
+			service TEXT NOT NULL DEFAULT '',
+			environment TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
 			severity TEXT NOT NULL,
 			first_seen_at DATETIME NOT NULL,
@@ -366,5 +485,130 @@ func schemaStatements() []string {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		diagnosisJobTableStatement(),
+		`CREATE INDEX IF NOT EXISTS idx_incident_diagnosis_jobs_ready ON incident_diagnosis_jobs(status, next_attempt_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_incident_diagnosis_jobs_incident ON incident_diagnosis_jobs(incident_id, episode_opened_at DESC)`,
+		databaseObservationSampleTableStatement(),
+		databaseObservationIntervalTableStatement(),
+		databaseObservationCheckpointTableStatement(),
+		databaseObservationLeaseTableStatement(),
+		databaseObservationStatusTableStatement(),
+		`CREATE INDEX IF NOT EXISTS idx_database_observation_samples_range ON database_observation_samples(target, kind, bucket_start, bucket_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_database_observation_intervals_range ON database_observation_intervals(target, bucket_start, bucket_end)`,
 	}
+}
+
+func databaseObservationSchemaStatements() []string {
+	return []string{
+		databaseObservationSampleTableStatement(),
+		databaseObservationIntervalTableStatement(),
+		databaseObservationCheckpointTableStatement(),
+		databaseObservationLeaseTableStatement(),
+		databaseObservationStatusTableStatement(),
+		`CREATE INDEX IF NOT EXISTS idx_database_observation_samples_range ON database_observation_samples(target, kind, bucket_start, bucket_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_database_observation_intervals_range ON database_observation_intervals(target, bucket_start, bucket_end)`,
+	}
+}
+
+func databaseObservationSampleTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS database_observation_samples (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		target TEXT NOT NULL,
+		engine TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		statement_fingerprint TEXT NOT NULL,
+		database_name TEXT NOT NULL DEFAULT '',
+		statement_preview TEXT NOT NULL DEFAULT '',
+		bucket_start DATETIME NOT NULL,
+		bucket_end DATETIME NOT NULL,
+		calls_delta INTEGER NOT NULL DEFAULT 0,
+		total_exec_ms_delta REAL NOT NULL DEFAULT 0,
+		rows_delta INTEGER NOT NULL DEFAULT 0,
+		time_semantics TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(target, kind, statement_fingerprint, bucket_end)
+	)`
+}
+
+func databaseObservationIntervalTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS database_observation_intervals (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		target TEXT NOT NULL,
+		engine TEXT NOT NULL,
+		bucket_start DATETIME NOT NULL,
+		bucket_end DATETIME NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(target, bucket_end)
+	)`
+}
+
+func databaseObservationCheckpointTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS database_observation_checkpoints (
+		target TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		statement_fingerprint TEXT NOT NULL,
+		database_name TEXT NOT NULL DEFAULT '',
+		statement_preview TEXT NOT NULL DEFAULT '',
+		calls_total INTEGER NOT NULL DEFAULT 0,
+		total_exec_ms_total REAL NOT NULL DEFAULT 0,
+		rows_total INTEGER NOT NULL DEFAULT 0,
+		observed_at DATETIME NOT NULL,
+		reset_at DATETIME,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY(target, kind, statement_fingerprint)
+	)`
+}
+
+func databaseObservationLeaseTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS database_observation_leases (
+		target TEXT PRIMARY KEY,
+		owner TEXT NOT NULL,
+		lease_until DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`
+}
+
+func databaseObservationStatusTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS database_observation_status (
+		target TEXT PRIMARY KEY,
+		engine TEXT NOT NULL,
+		status TEXT NOT NULL,
+		error_code TEXT,
+		last_error TEXT,
+		last_success_at DATETIME,
+		last_attempt_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`
+}
+
+func diagnosisJobSchemaStatements() []string {
+	return []string{
+		`ALTER TABLE incidents ADD COLUMN service TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE incidents ADD COLUMN environment TEXT NOT NULL DEFAULT ''`,
+		diagnosisJobTableStatement(),
+		`CREATE INDEX IF NOT EXISTS idx_incident_diagnosis_jobs_ready ON incident_diagnosis_jobs(status, next_attempt_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_incident_diagnosis_jobs_incident ON incident_diagnosis_jobs(incident_id, episode_opened_at DESC)`,
+	}
+}
+
+func diagnosisJobTableStatement() string {
+	return `CREATE TABLE IF NOT EXISTS incident_diagnosis_jobs (
+		id TEXT PRIMARY KEY,
+		incident_id TEXT NOT NULL,
+		episode_opened_at DATETIME NOT NULL,
+		request_json TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at DATETIME NOT NULL,
+		lease_until DATETIME,
+		conversation_id TEXT NOT NULL,
+		run_id TEXT,
+		result_json TEXT,
+		last_error TEXT,
+		started_at DATETIME,
+		completed_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(incident_id, episode_opened_at)
+	)`
 }

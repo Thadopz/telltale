@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/appconfig"
 	"github.com/Thadopz/telltale/internal/authz"
 	"strings"
 	"time"
@@ -75,31 +76,21 @@ func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 }
 
 func issueToolOutput(ctx context.Context, toolName string, output string) string {
+	if mode, err := appconfig.EvaluationEvidenceMode(ctx); err == nil && mode == "raw_unenforced" {
+		return projectRawEvaluationOutput(output)
+	}
 	parsed := evidence.Parse(output)
 	if !parsed.IsJSON {
 		return evidence.Marshal(evidence.NewUnstructuredResult(toolName))
 	}
 	parsed.Envelope = evidence.SanitizeUntrustedEnvelope(parsed.Envelope)
-	if parsed.Envelope.Status == evidence.StatusSuccess && len(parsed.Envelope.Observations) == 0 {
-		envelope := parsed.Envelope
-		envelope.EvidenceID = ""
-		envelope.CanUseAsEvidence = false
-		if strings.TrimSpace(envelope.DataStatus) == "" || envelope.DataStatus == evidence.DataPresent {
-			envelope.DataStatus = evidence.DataUnknown
-		}
-		if strings.TrimSpace(envelope.FailureReason) == "" {
-			envelope.FailureReason = "unstructured_tool_result"
-		}
-		envelope.RuntimeVerified = false
-		return evidence.Marshal(envelope)
-	}
 	if parsed.Envelope.Status != evidence.StatusSuccess {
 		return evidence.Marshal(parsed.Envelope)
 	}
 
 	principal := authz.PrincipalFromContext(ctx)
 	trustLevel := evidence.ContentTrustTrustedLocal
-	if parsed.Envelope.TrustLevel == evidence.ContentTrustUntrustedExternal {
+	if parsed.Envelope.Evidence != nil && parsed.Envelope.Evidence.Attestation.IssuerTrust == evidence.ContentTrustUntrustedExternal {
 		trustLevel = evidence.ContentTrustUntrustedExternal
 	}
 	issued := evidence.IssueEnvelope(parsed.Envelope, evidence.IssueMetadata{
@@ -111,6 +102,34 @@ func issueToolOutput(ctx context.Context, toolName string, output string) string
 		ExpiresAfter:   10 * time.Minute,
 	})
 	return evidence.Marshal(issued)
+}
+
+func projectRawEvaluationOutput(output string) string {
+	var source struct {
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data"`
+		Summary string          `json:"summary"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal([]byte(output), &source) != nil {
+		return `{"status":"protocol_error","summary":"raw evaluation tool result was not JSON"}`
+	}
+	if strings.TrimSpace(source.Status) == "" {
+		source.Status = evidence.StatusUnknown
+	}
+	if strings.TrimSpace(source.Summary) == "" {
+		source.Summary = source.Message
+	}
+	projection := struct {
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data,omitempty"`
+		Summary string          `json:"summary,omitempty"`
+	}{Status: source.Status, Data: source.Data, Summary: source.Summary}
+	encoded, err := json.Marshal(projection)
+	if err != nil {
+		return `{"status":"protocol_error","summary":"raw evaluation projection failed"}`
+	}
+	return string(encoded)
 }
 
 type toolRunResult struct {

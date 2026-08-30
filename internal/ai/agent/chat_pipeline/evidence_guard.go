@@ -42,45 +42,17 @@ func evidenceFromToolEvidenceDetailed(items []trace.ToolEvidence) ([]evidence.Ev
 	var protocolIssues []evidence.EvidenceProtocolIssue
 	for _, item := range items {
 		env := item.Envelope
-		if env.Status == evidence.StatusSuccess && env.CanUseAsEvidence && env.EvidenceID != "" && len(env.Observations) > 0 {
-			evidenceItems = append(evidenceItems, evidence.EvidenceItem{
-				EvidenceID:       env.EvidenceID,
-				ToolName:         item.ToolName,
-				SourceKind:       env.SourceKind,
-				Repository:       env.Repository,
-				Revision:         env.Revision,
-				SnapshotDigest:   env.SnapshotDigest,
-				VersionAlignment: env.VersionAlignment,
-				RuntimeVerified:  env.RuntimeVerified,
-				ContentTrust:     env.ContentTrust,
-				Issuer:           env.Issuer,
-				RunID:            env.RunID,
-				ConversationID:   env.ConversationID,
-				TenantID:         env.TenantID,
-				ObservedAt:       env.ObservedAt,
-				ExpiresAt:        env.ExpiresAt,
-				ContentDigest:    env.ContentDigest,
-				TrustLevel:       env.TrustLevel,
-				OperationID:      env.OperationID,
-				ResultMetadata:   env.ResultMetadata,
-				Scope:            env.Scope,
-				Subject:          env.Subject,
-				Observations:     env.Observations,
-				Summary:          env.Summary,
-			})
-		} else if env.Status == evidence.StatusSuccess {
+		if evidenceItem, ok := env.ToEvidenceItem(item.ToolName); ok {
+			evidenceItems = append(evidenceItems, evidenceItem)
+		}
+		if env.Status == evidence.StatusProtocolError {
 			protocolIssues = append(protocolIssues, evidence.EvidenceProtocolIssue{
 				ToolName: item.ToolName,
-				Reason:   "successful tool result has no usable structured observations",
+				Reason:   env.Summary,
 			})
 		}
-		if env.FailedQueryID != "" {
-			failedQueries = append(failedQueries, evidence.FailedQuery{
-				FailedQueryID: env.FailedQueryID,
-				ToolName:      item.ToolName,
-				Status:        env.Status,
-				Summary:       env.Summary,
-			})
+		if failedQuery, ok := env.ToFailedQuery(item.ToolName); ok {
+			failedQueries = append(failedQueries, failedQuery)
 		}
 	}
 	return evidenceItems, failedQueries, protocolIssues
@@ -104,45 +76,17 @@ func evidenceFromTraceDetailed(steps []trace.AgentStep) ([]evidence.EvidenceItem
 				continue
 			}
 			env := evidence.Parse(raw).Envelope
-			if env.Status == evidence.StatusSuccess && env.CanUseAsEvidence && env.EvidenceID != "" && len(env.Observations) > 0 {
-				evidenceItems = append(evidenceItems, evidence.EvidenceItem{
-					EvidenceID:       env.EvidenceID,
-					ToolName:         step.Name,
-					SourceKind:       env.SourceKind,
-					Repository:       env.Repository,
-					Revision:         env.Revision,
-					SnapshotDigest:   env.SnapshotDigest,
-					VersionAlignment: env.VersionAlignment,
-					RuntimeVerified:  env.RuntimeVerified,
-					ContentTrust:     env.ContentTrust,
-					Issuer:           env.Issuer,
-					RunID:            env.RunID,
-					ConversationID:   env.ConversationID,
-					TenantID:         env.TenantID,
-					ObservedAt:       env.ObservedAt,
-					ExpiresAt:        env.ExpiresAt,
-					ContentDigest:    env.ContentDigest,
-					TrustLevel:       env.TrustLevel,
-					OperationID:      env.OperationID,
-					ResultMetadata:   env.ResultMetadata,
-					Scope:            env.Scope,
-					Subject:          env.Subject,
-					Observations:     env.Observations,
-					Summary:          env.Summary,
-				})
-			} else if env.Status == evidence.StatusSuccess {
+			if evidenceItem, ok := env.ToEvidenceItem(step.Name); ok {
+				evidenceItems = append(evidenceItems, evidenceItem)
+			}
+			if env.Status == evidence.StatusProtocolError {
 				protocolIssues = append(protocolIssues, evidence.EvidenceProtocolIssue{
 					ToolName: step.Name,
-					Reason:   "trace contains a successful result without usable structured observations",
+					Reason:   env.Summary,
 				})
 			}
-			if env.FailedQueryID != "" {
-				failedQueries = append(failedQueries, evidence.FailedQuery{
-					FailedQueryID: env.FailedQueryID,
-					ToolName:      step.Name,
-					Status:        env.Status,
-					Summary:       env.Summary,
-				})
+			if failedQuery, ok := env.ToFailedQuery(step.Name); ok {
+				failedQueries = append(failedQueries, failedQuery)
 			}
 		}
 	}
@@ -161,11 +105,11 @@ func containsString(values []string, expected string) bool {
 func evidenceSetFromToolEvidence(items []trace.ToolEvidence) evidence.EvidenceSet {
 	sets := make([]evidence.EvidenceSet, 0, len(items)*2)
 	for _, item := range items {
-		if item.EvidenceID != "" {
-			sets = append(sets, evidence.EvidenceSet{EvidenceIDs: map[string]bool{item.EvidenceID: true}})
+		if item.EvidenceID() != "" {
+			sets = append(sets, evidence.EvidenceSet{EvidenceIDs: map[string]bool{item.EvidenceID(): true}})
 		}
-		if item.FailedQueryID != "" {
-			sets = append(sets, evidence.EvidenceSet{FailedQueryIDs: map[string]bool{item.FailedQueryID: true}})
+		if item.FailedQueryID() != "" {
+			sets = append(sets, evidence.EvidenceSet{FailedQueryIDs: map[string]bool{item.FailedQueryID(): true}})
 		}
 	}
 	return evidence.Merge(sets...)

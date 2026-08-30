@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/appconfig"
 	"github.com/Thadopz/telltale/internal/authz"
 	"os"
 	"sort"
@@ -99,6 +100,15 @@ func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON st
 		recordConfiguredMCPFailure(t.circuitKey)
 		return marshalToolError(fmt.Errorf("MCP output exceeds %d bytes", t.maxOutputBytes), "MCP tool output rejected by size policy"), nil
 	}
+	if mode, modeErr := appconfig.EvaluationEvidenceMode(ctx); modeErr == nil && mode == "raw_unenforced" {
+		rawOutput, ok := configuredMCPTextOutput(output)
+		if !ok {
+			recordConfiguredMCPFailure(t.circuitKey)
+			return marshalToolError(errors.New("MCP result did not contain a JSON text block"), "MCP raw eval output rejected"), nil
+		}
+		recordConfiguredMCPSuccess(t.circuitKey)
+		return rawOutput, nil
+	}
 	if evidence.Parse(output).Envelope.Status != evidence.StatusSuccess {
 		recordConfiguredMCPFailure(t.circuitKey)
 	} else {
@@ -122,23 +132,40 @@ func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON st
 		Summary: message,
 	}
 	if structured, ok := structuredMCPEvidence(output); ok {
-		structured.TrustLevel = evidence.ContentTrustUntrustedExternal
-		structured.Observations = append(structured.Observations, observation)
-		if strings.TrimSpace(structured.Message) == "" {
-			structured.Message = message
-		}
+		structured.Evidence.Attestation.IssuerTrust = evidence.ContentTrustUntrustedExternal
+		structured.Evidence.Observations = append(structured.Evidence.Observations, observation)
 		if strings.TrimSpace(structured.Summary) == "" {
-			structured.Summary = structured.Message
+			structured.Summary = message
 		}
 		return evidence.Marshal(structured), nil
 	}
 	env := evidence.NewDataWithObservations(output, message, []evidence.Observation{observation})
-	env.TrustLevel = evidence.ContentTrustUntrustedExternal
+	env.Evidence.Attestation.IssuerTrust = evidence.ContentTrustUntrustedExternal
 	return evidence.Marshal(env), nil
 }
 
+func configuredMCPTextOutput(output string) (string, bool) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if json.Unmarshal([]byte(output), &result) != nil || result.IsError {
+		return "", false
+	}
+	for _, block := range result.Content {
+		if block.Type != "text" || strings.TrimSpace(block.Text) == "" || !json.Valid([]byte(block.Text)) {
+			continue
+		}
+		return evidence.SanitizeUntrustedJSON(block.Text), true
+	}
+	return "", false
+}
+
 // structuredMCPEvidence accepts an MCP text result whose text is a standard
-// Evidence Envelope. Plain MCP results keep the legacy generic wrapper above.
+// Evidence Envelope. Plain MCP results use the generic v2 wrapper above.
 // This makes configured MCP servers able to preserve source type, runtime
 // verification, and observation kinds without trusting arbitrary prose.
 func structuredMCPEvidence(output string) (evidence.Envelope, bool) {
@@ -158,8 +185,10 @@ func structuredMCPEvidence(output string) (evidence.Envelope, bool) {
 		}
 		parsed := evidence.Parse(block.Text)
 		envelope := parsed.Envelope
-		if !parsed.IsJSON || envelope.Status != evidence.StatusSuccess ||
-			envelope.EvidenceID == "" || !envelope.CanUseAsEvidence {
+		if !parsed.IsJSON || envelope.Status != evidence.StatusSuccess {
+			continue
+		}
+		if _, ok := envelope.UsableEvidence(); !ok {
 			continue
 		}
 		return envelope, true

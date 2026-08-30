@@ -35,21 +35,14 @@ func TestRedactTextHandlesDSNBearerPEMAndHighEntropyValues(t *testing.T) {
 }
 
 func TestRedactToolOutputDropsRawDataAndSanitizesObservations(t *testing.T) {
-	raw := evidence.Marshal(evidence.Envelope{
-		Success:          true,
-		Status:           evidence.StatusSuccess,
-		EvidenceID:       "ev_local",
-		CanUseAsEvidence: true,
-		DataStatus:       evidence.DataPresent,
-		Data:             map[string]any{"password": "do-not-persist"},
-		SourceKind:       evidence.SourceRuntimeLog,
-		Observations: []evidence.Observation{{
-			Kind:    evidence.ObservationLogError,
-			Fields:  map[string]any{"token": "do-not-persist-token", "error_code": "ERR_PAYMENT"},
-			Summary: "password=do-not-persist",
-		}},
-		Message: "authorization=do-not-persist",
-	})
+	envelope := evidence.NewDataWithObservations(map[string]any{"password": "do-not-persist"}, "authorization=do-not-persist", []evidence.Observation{{
+		Kind:    evidence.ObservationLogError,
+		Fields:  map[string]any{"token": "do-not-persist-token", "error_code": "ERR_PAYMENT"},
+		Summary: "password=do-not-persist",
+	}})
+	envelope.Evidence.EvidenceID = "ev_local"
+	envelope.Evidence.Provenance.SourceKind = evidence.SourceRuntimeLog
+	raw := evidence.Marshal(envelope)
 
 	redacted := redactToolOutput(raw)
 	if redacted == "" {
@@ -64,8 +57,8 @@ func TestRedactToolOutputDropsRawDataAndSanitizesObservations(t *testing.T) {
 	if parsed.Data != nil {
 		t.Fatalf("raw tool data must not be persisted: %#v", parsed.Data)
 	}
-	if len(parsed.Observations) != 1 || parsed.Observations[0].Fields["token"] == "do-not-persist-token" {
-		t.Fatalf("observation fields were not sanitized: %#v", parsed.Observations)
+	if parsed.Evidence == nil || len(parsed.Evidence.Observations) != 1 || parsed.Evidence.Observations[0].Fields["token"] == "do-not-persist-token" {
+		t.Fatalf("observation fields were not sanitized: %#v", parsed.Evidence)
 	}
 }
 

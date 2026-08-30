@@ -50,5 +50,5 @@ func (f *ChatAgentFactory) cacheKey(ctx context.Context) string {
 	principal := authz.PrincipalFromContext(ctx)
 	roles := append([]string(nil), principal.Roles...)
 	sort.Strings(roles)
-	return strings.Join(roles, ",")
+	return strings.TrimSpace(principal.TenantID) + "|" + strings.Join(roles, ",")
 }

@@ -3,6 +3,7 @@ package sqlobserve
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 type QueryKind string
@@ -26,14 +27,20 @@ const (
 )
 
 type QueryRequest struct {
-	Kind     QueryKind
-	Target   string
-	Source   string
-	Window   string
-	SortBy   string
-	Limit    int
-	MaxBytes int
-	SQL      string
+	Kind              QueryKind
+	Target            string
+	Source            string
+	StartTime         string
+	EndTime           string
+	Window            string
+	DefaultTimeRange  bool
+	DefaultWindow     time.Duration
+	MaxWindow         time.Duration
+	ResolvedTimeRange *TimeRange
+	SortBy            string
+	Limit             int
+	MaxBytes          int
+	SQL               string
 }
 
 type ResultBudget struct {
@@ -61,9 +68,14 @@ type QueryPlan struct {
 	Target          string
 	Source          string
 	Window          string
+	TimeRange       *TimeRange
 	SortBy          string
 	Limit           int
 	SQL             string
+	Args            []any
+	LocalHistory    bool
+	DataStatus      string
+	Coverage        map[string]any
 	Projection      []string
 	ObservationKind string
 	LargeTextFields []string
@@ -80,8 +92,14 @@ type DatabaseAdapter interface {
 }
 
 type QueryExecutor interface {
-	Query(context.Context, string) ([]map[string]any, error)
+	Query(context.Context, string, ...any) ([]map[string]any, error)
 	Close() error
+}
+
+// DatabaseClock is implemented by executors that can anchor relative windows
+// to the target database rather than to the Telltale process clock.
+type DatabaseClock interface {
+	CurrentTime(context.Context) (time.Time, error)
 }
 
 type ExecutorFactory func(context.Context, string) (QueryExecutor, error)

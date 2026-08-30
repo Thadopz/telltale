@@ -51,6 +51,7 @@ func newChatTemplate(ctx context.Context) (ctp prompt.ChatTemplate, err error) {
 		Templates: []schema.MessagesTemplate{
 			schema.SystemMessage(coordinatorSystemPrompt()),
 			schema.MessagesPlaceholder("history", false),
+			schema.MessagesPlaceholder("turn_context", true),
 			schema.UserMessage("{content}"),
 		},
 	}
@@ -61,7 +62,7 @@ func newChatTemplate(ctx context.Context) (ctp prompt.ChatTemplate, err error) {
 }
 
 func coordinatorSystemPrompt() string {
-	return systemPrompt + coordinatorPrompt + safetyPrompt + evidenceScopePrompt + memoryPrompt + summaryPrompt
+	return systemPrompt + coordinatorPrompt + safetyPrompt + evidenceScopePrompt
 }
 
 const safetyPrompt = `
@@ -86,19 +87,10 @@ var systemPrompt = `
 - 如果问题复杂，先给出 2 到 5 步简短排查路径，再按证据收敛结论。
 - 对运维类问题，尽量按“现象、判断、依据、建议、风险”组织答案。
 
-## 当前上下文
-- 当前日期：{date}
-
 ## Project Context
 {project_context}
 
-## Request Analysis
-{request_analysis}
-
-Active skills:
-==== Skills Start ====
-{skills}
-==== Skills End ====
+逐轮变化的摘要、会话状态、记忆、工具结果、Skill、请求分析和当前时间会作为历史消息之后的独立系统消息提供。
 `
 
 const coordinatorPrompt = `
@@ -121,26 +113,8 @@ const evidenceScopePrompt = `
 - 不得把单个订单、单个实例、单个时间窗口或单个领域的结果推广为整个系统、其他对象、其他时间范围或其他领域的结论。
 - 跨领域结论必须分别获得每个相关领域的有效证据；一个领域的证据不能替代另一个领域的实时状态。
 - 内部文档和手册只能证明规范或建议，不能证明当前线上状态；历史对话中的状态也不能替代新的实时查询。
-- status="success"、can_use_as_evidence=true 且具有 evidence_id 的结果才能支持事实结论。
+- 只有 status="success" 且包含 evidence.evidence_id 与非空 evidence.observations 的结果才能支持事实结论。
 - data_status="empty" 只证明该次查询范围内没有匹配结果，不证明更大范围不存在问题。
-- failed_query_id、超时、拒绝或其他失败只表示对应范围未验证，不能证明正常、异常或不存在。
+- failure.query_id、超时、拒绝或其他失败只表示对应范围未验证，不能证明正常、异常或不存在。
 - 汇总时让每项事实紧邻其 evidence_id；超出证据范围的内容必须放入“未验证/证据缺口”。
-`
-
-const summaryPrompt = `
-
-Conversation summary from earlier turns:
-{summary}
-`
-
-const memoryPrompt = `
-
-Current session state:
-{session_state}
-
-Durable memory about this user:
-{durable_memory}
-
-Recent tool results:
-{tool_results}
 `

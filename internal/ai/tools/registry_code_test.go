@@ -88,7 +88,7 @@ func TestCodeToolRuntimeAuthorizationRejectsWrongAgentScope(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
 		t.Fatalf("parse code tool envelope: %v", err)
 	}
-	if envelope["success"] != true {
+	if envelope["status"] != "success" {
 		t.Fatalf("expected allowed code search, got %s", out)
 	}
 }

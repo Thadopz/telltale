@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 )
@@ -45,29 +46,84 @@ func (observer *Observer) Query(ctx context.Context, request QueryRequest) (evid
 		return evidence.Envelope{}, fmt.Errorf("sql observer is not configured")
 	}
 
+	request, trustedErr := applyTrustedTimeRange(ctx, request)
+	if trustedErr != nil {
+		return timeRangeFailureEnvelope(QueryPlan{Kind: request.Kind, Capability: capabilityForQueryKind(request.Kind)}, trustedErr.Error()), nil
+	}
+	request = applyConfiguredTimeLimits(ctx, request)
 	request.Target = configuredTargetName(ctx, request.Target)
 	adapter, err := observer.adapterFor(ctx, request.Target)
 	if err != nil {
 		return evidence.Envelope{}, err
 	}
+	capabilityPlan := QueryPlan{
+		Kind:       request.Kind,
+		Engine:     adapter.Engine(),
+		Capability: capabilityForQueryKind(request.Kind),
+		Target:     request.Target,
+	}
+	if request.Kind != QuerySlowSQL && needsDatabaseClock(request) {
+		return timeRangeFailureEnvelope(capabilityPlan, "historical time parameters are only supported for slow_sql"), nil
+	}
+	if !adapter.Supports(request.Kind) {
+		return unsupportedCapabilityEnvelope(capabilityPlan), nil
+	}
+
+	var executor QueryExecutor
+	if needsDatabaseClock(request) {
+		executor, err = observer.openExecutor(ctx, request.Target, adapter)
+		if err != nil {
+			return queryErrorEnvelope(err, capabilityPlan), nil
+		}
+		clock, ok := executor.(DatabaseClock)
+		if !ok {
+			executor.Close()
+			return timeRangeFailureEnvelope(capabilityPlan, "database clock is unavailable"), nil
+		}
+		databaseNow, clockErr := clock.CurrentTime(ctx)
+		if clockErr != nil {
+			executor.Close()
+			return queryErrorEnvelope(clockErr, capabilityPlan), nil
+		}
+		resolved, resolveErr := resolveTimeRange(request, databaseNow)
+		if resolveErr != nil {
+			executor.Close()
+			return timeRangeFailureEnvelope(capabilityPlan, resolveErr.Error()), nil
+		}
+		request.ResolvedTimeRange = resolved
+	} else {
+		resolved, resolveErr := resolveTimeRange(request, time.Now().UTC())
+		if resolveErr != nil {
+			return timeRangeFailureEnvelope(capabilityPlan, resolveErr.Error()), nil
+		}
+		request.ResolvedTimeRange = resolved
+	}
 	plan, err := adapter.BuildPlan(request, observer.Budget)
 	if err != nil {
+		if executor != nil {
+			executor.Close()
+		}
 		return evidence.Envelope{}, err
 	}
 	plan.Engine = adapter.Engine()
 	plan.Capability = capabilityForQueryKind(request.Kind)
 	plan.Target = request.Target
-	if !adapter.Supports(request.Kind) {
-		return unsupportedCapabilityEnvelope(plan), nil
+	var rows []map[string]any
+	if plan.LocalHistory {
+		if executor != nil {
+			defer executor.Close()
+		}
+		rows, err = queryLocalHistory(ctx, &plan)
+	} else {
+		if executor == nil {
+			executor, err = observer.openExecutor(ctx, request.Target, adapter)
+			if err != nil {
+				return queryErrorEnvelope(err, plan), nil
+			}
+		}
+		defer executor.Close()
+		rows, err = executor.Query(ctx, plan.SQL, plan.Args...)
 	}
-
-	executor, err := observer.openExecutor(ctx, request.Target, adapter)
-	if err != nil {
-		return queryErrorEnvelope(err, plan), nil
-	}
-	defer executor.Close()
-
-	rows, err := executor.Query(ctx, plan.SQL)
 	if err != nil {
 		return queryErrorEnvelope(err, plan), nil
 	}
@@ -141,8 +197,14 @@ func (observer *Observer) buildEnvelopeWithinBudget(plan QueryPlan, rows []map[s
 			"capability":      plan.Capability,
 			"rows":            rows,
 		}
+		if len(plan.Coverage) > 0 {
+			data["coverage"] = plan.Coverage
+		}
 		message := fmt.Sprintf("%s query returned %d rows", string(plan.Kind), len(rows))
 		envelope := evidence.NewDataWithResultMetadata(data, message, observations, metadata)
+		if plan.DataStatus != "" {
+			envelope.DataStatus = plan.DataStatus
+		}
 		if len(evidence.Marshal(envelope)) <= maxBytes {
 			return envelope
 		}
@@ -167,9 +229,15 @@ func buildObservations(plan QueryPlan, rows []map[string]any, maxObservations in
 		for key, value := range row {
 			fields[key] = value
 		}
+		scope := evidence.EvidenceScope{Fields: queryScopeFields(plan)}
+		if plan.TimeRange != nil {
+			scope.StartTime = plan.TimeRange.Start.UTC().Format(time.RFC3339)
+			scope.EndTime = plan.TimeRange.End.UTC().Format(time.RFC3339)
+			scope.TimeRange = "[start_time,end_time)"
+		}
 		observations = append(observations, evidence.Observation{
 			Kind:    plan.ObservationKind,
-			Scope:   evidence.EvidenceScope{Fields: queryScopeFields(plan)},
+			Scope:   scope,
 			Fields:  fields,
 			Summary: fmt.Sprintf("%s observation row %d", string(plan.Kind), index+1),
 		})
@@ -187,6 +255,12 @@ func queryScopeFields(plan QueryPlan) map[string]string {
 	}
 	if plan.Window != "" {
 		fields["window"] = plan.Window
+	}
+	if plan.TimeRange != nil {
+		fields["start_time"] = plan.TimeRange.Start.Format(time.RFC3339)
+		fields["end_time"] = plan.TimeRange.End.Format(time.RFC3339)
+		fields["time_range_source"] = string(plan.TimeRange.Source)
+		fields["time_semantics"] = plan.TimeRange.Semantics
 	}
 	if plan.SortBy != "" {
 		fields["sort_by"] = plan.SortBy
@@ -217,20 +291,14 @@ func emptyResultEnvelope(plan QueryPlan, metadata evidence.ResultMetadata) evide
 		nil,
 		metadata,
 	)
-	envelope.EvidenceID = ""
-	envelope.CanUseAsEvidence = false
 	envelope.DataStatus = evidence.DataEmpty
-	envelope.FailureReason = "empty_result"
 	return envelope
 }
 
 func resultTooLargeEnvelope(plan QueryPlan, maxBytes int) evidence.Envelope {
-	envelope := evidence.NewError(nil, fmt.Sprintf("%s query result exceeded the configured budget", string(plan.Kind)))
-	envelope.Status = evidence.StatusUnknown
-	envelope.ErrorCode = "RESULT_BUDGET_EXCEEDED"
-	envelope.FailureReason = "result_row_exceeds_budget"
-	envelope.DataStatus = evidence.DataUnknown
-	envelope.ResultMetadata = evidence.ResultMetadata{
+	summary := fmt.Sprintf("query result exceeded max_bytes=%d", maxBytes)
+	envelope := evidence.NewFailure(evidence.StatusError, "RESULT_BUDGET_EXCEEDED", "result_row_exceeds_budget", summary)
+	metadata := evidence.ResultMetadata{
 		MaxRows:          plan.Limit,
 		MaxBytes:         maxBytes,
 		Truncated:        true,
@@ -242,26 +310,18 @@ func resultTooLargeEnvelope(plan QueryPlan, maxBytes int) evidence.Envelope {
 		"database_engine": string(plan.Engine),
 		"target":          plan.Target,
 		"capability":      plan.Capability,
+		"result_metadata": metadata,
 	}
-	envelope.Message = fmt.Sprintf("query result exceeded max_bytes=%d", maxBytes)
-	envelope.Summary = envelope.Message
 	return envelope
 }
 
 func unsupportedCapabilityEnvelope(plan QueryPlan) evidence.Envelope {
-	envelope := evidence.NewError(nil, fmt.Sprintf("database capability %s is not supported by %s", plan.Capability, plan.Engine))
-	envelope.Status = evidence.StatusUnknown
-	envelope.DataStatus = evidence.DataUnknown
-	envelope.ErrorCode = "CAPABILITY_NOT_SUPPORTED"
-	envelope.FailureReason = "capability_not_supported"
-	envelope.CanUseAsEvidence = false
-	envelope.EvidenceID = ""
+	envelope := evidence.NewFailure(evidence.StatusError, "CAPABILITY_NOT_SUPPORTED", "capability_not_supported", fmt.Sprintf("database capability %s is not supported by %s", plan.Capability, plan.Engine))
 	envelope.Data = map[string]any{
 		"database_engine": plan.Engine,
 		"target":          plan.Target,
 		"capability":      plan.Capability,
 	}
-	envelope.Summary = envelope.Message
 	return envelope
 }
 
@@ -291,18 +351,35 @@ func queryErrorEnvelope(err error, plan QueryPlan) evidence.Envelope {
 		"target":          plan.Target,
 		"capability":      plan.Capability,
 	}
-	envelope.FailureReason = "query_error"
-	envelope.DataStatus = evidence.DataUnknown
+	envelope.Failure.Reason = "query_error"
 	lower := strings.ToLower(err.Error())
+	if plan.Kind == QuerySlowSQL && plan.TimeRange != nil {
+		envelope.Failure.Code = "TIME_RANGE_SOURCE_UNAVAILABLE"
+		envelope.Failure.Reason = "time_range_source_unavailable"
+	}
 	if strings.Contains(lower, "doesn't exist") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "unknown table") || strings.Contains(lower, "unknown database") {
-		envelope.Status = evidence.StatusUnknown
-		envelope.ErrorCode = "SOURCE_UNAVAILABLE"
-		envelope.FailureReason = "source_unavailable"
+		if plan.Kind == QuerySlowSQL && plan.TimeRange != nil {
+			envelope.Failure.Code = "TIME_RANGE_SOURCE_UNAVAILABLE"
+			envelope.Failure.Reason = "time_range_source_unavailable"
+		} else {
+			envelope.Failure.Code = "SOURCE_UNAVAILABLE"
+			envelope.Failure.Reason = "source_unavailable"
+		}
 	}
 	if strings.Contains(lower, "access denied") || strings.Contains(lower, "permission") {
 		envelope.Status = evidence.StatusPermissionDenied
-		envelope.ErrorCode = "PERMISSION_DENIED"
-		envelope.FailureReason = "permission_denied"
+		envelope.Failure.Code = "PERMISSION_DENIED"
+		envelope.Failure.Reason = "permission_denied"
+	}
+	return envelope
+}
+
+func timeRangeFailureEnvelope(plan QueryPlan, reason string) evidence.Envelope {
+	envelope := evidence.NewFailure(evidence.StatusError, "INVALID_TIME_RANGE", "invalid_time_range", "database time range was rejected: "+reason)
+	envelope.Data = map[string]any{
+		"database_engine": plan.Engine,
+		"target":          plan.Target,
+		"capability":      plan.Capability,
 	}
 	return envelope
 }

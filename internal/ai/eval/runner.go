@@ -15,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/gogf/gf/v2/frame/g"
 )
 
 func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseResult, error) {
@@ -31,6 +32,8 @@ func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseRes
 	variantCount := 1
 	if opts.Mode == ModeContextStress {
 		variantCount = len(contextStressVariants())
+	} else if opts.Mode == ModeEvidenceAblation {
+		variantCount = len(EvidenceModes())
 	}
 	results := make([]EvalCaseResult, 0, len(cases)*opts.Repetitions*variantCount)
 	for _, evalCase := range cases {
@@ -41,6 +44,8 @@ func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseRes
 			variants := []string{""}
 			if opts.Mode == ModeContextStress {
 				variants = contextStressVariants()
+			} else if opts.Mode == ModeEvidenceAblation {
+				variants = evidenceModeOrder(attempt)
 			}
 			for _, variant := range variants {
 				caseCtx := ctx
@@ -49,7 +54,11 @@ func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseRes
 					caseCtx, cancel = context.WithTimeout(ctx, time.Duration(opts.CaseTimeoutSeconds)*time.Second)
 				}
 				variantOptions := opts
-				variantOptions.ContextStressVariant = variant
+				if opts.Mode == ModeEvidenceAblation {
+					variantOptions.EvidenceMode = EvidenceMode(variant)
+				} else {
+					variantOptions.ContextStressVariant = variant
+				}
 				result, err := RunCase(caseCtx, evalCase, variantOptions, attempt)
 				cancel()
 				if err != nil {
@@ -60,6 +69,18 @@ func RunCases(ctx context.Context, cases []Case, opts RunOptions) ([]EvalCaseRes
 		}
 	}
 	return results, nil
+}
+
+// evidenceModeOrder is a three-period Latin-square schedule. Each arm appears
+// once in every position across three consecutive attempts.
+func evidenceModeOrder(attempt int) []string {
+	modes := EvidenceModes()
+	start := (attempt - 1) % len(modes)
+	ordered := make([]string, 0, len(modes))
+	for offset := 0; offset < len(modes); offset++ {
+		ordered = append(ordered, string(modes[(start+offset)%len(modes)]))
+	}
+	return ordered
 }
 
 func validateCaseForMode(evalCase Case, mode Mode) error {
@@ -90,8 +111,41 @@ func validateCaseForMode(evalCase Case, mode Mode) error {
 		if len(evalCase.ModelSteps) > 0 || len(evalCase.FailoverModelSteps) > 0 {
 			return fmt.Errorf("query result pressure case %q must not contain scripted model steps", evalCase.ID)
 		}
+	case ModeEvidenceAblation:
+		if evalCase.Truth == nil {
+			return fmt.Errorf("evidence ablation case %q requires atomic truth", evalCase.ID)
+		}
+		if err := validateAblationTruth(evalCase.ID, *evalCase.Truth); err != nil {
+			return err
+		}
+		if len(evalCase.ToolFixtures) == 0 {
+			return fmt.Errorf("evidence ablation case %q requires canonical tool fixtures", evalCase.ID)
+		}
+		if evalCase.AblationNoiseChars < 0 || evalCase.AblationNoiseChars > 65536 {
+			return fmt.Errorf("evidence ablation case %q ablation_noise_chars must be between 0 and 65536", evalCase.ID)
+		}
 	default:
 		return fmt.Errorf("unsupported eval mode %q", mode)
+	}
+	return nil
+}
+
+func validateAblationTruth(caseID string, truth AblationTruth) error {
+	if strings.TrimSpace(truth.RootCause) == "" {
+		return fmt.Errorf("evidence ablation case %q truth is missing root_cause", caseID)
+	}
+	seen := map[string]bool{}
+	for _, collection := range [][]AtomicTruth{truth.RequiredFacts, truth.ForbiddenClaims} {
+		for _, fact := range collection {
+			id := strings.TrimSpace(fact.ID)
+			if id == "" || strings.TrimSpace(fact.Description) == "" {
+				return fmt.Errorf("evidence ablation case %q has an atomic truth without id or description", caseID)
+			}
+			if seen[id] {
+				return fmt.Errorf("evidence ablation case %q has duplicate atomic truth id %q", caseID, id)
+			}
+			seen[id] = true
+		}
 	}
 	return nil
 }
@@ -101,6 +155,12 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 	conversationID := fmt.Sprintf("eval-%s-%s-%d", sanitizeID(evalCase.ID), opts.RunID, attempt)
 	if opts.ContextStressVariant != "" {
 		conversationID += "-" + sanitizeID(opts.ContextStressVariant)
+	}
+	if opts.Mode == ModeEvidenceAblation {
+		if !validEvidenceMode(opts.EvidenceMode) {
+			return EvalCaseResult{}, fmt.Errorf("unsupported evidence mode %q", opts.EvidenceMode)
+		}
+		conversationID += "-" + sanitizeID(string(opts.EvidenceMode))
 	}
 	if opts.Mode == ModeSmoke || opts.Mode == ModeQueryResultPressure {
 		ctx = authz.WithPrincipal(ctx, authz.Principal{UserID: "eval", Roles: []string{"oncall"}})
@@ -120,17 +180,27 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 			return EvalCaseResult{}, err
 		}
 	}
+	if opts.Mode == ModeEvidenceAblation {
+		noiseChars := preparedCase.AblationNoiseChars
+		if noiseChars == 0 && strings.EqualFold(strings.TrimSpace(preparedCase.Category), "long_context") {
+			noiseChars = 24000
+		}
+		preparedCase.Context.DurableMemory += ablationContextNoise(noiseChars)
+	}
 
 	userMessage := buildUserMessage(preparedCase, conversationID)
 	result := EvalCaseResult{
 		ID:             evalCase.ID,
 		Attempt:        attempt,
 		Variant:        opts.ContextStressVariant,
+		EvidenceMode:   opts.EvidenceMode,
+		PairID:         fmt.Sprintf("%s/%d", evalCase.ID, attempt),
 		Category:       evalCase.Category,
 		Mode:           opts.Mode,
 		Query:          evalCase.Query,
 		ConversationID: conversationID,
 		StartedAt:      startedAt,
+		ModelVersion:   configuredEvalModelVersion(ctx, opts),
 		Context: ContextEvidence{
 			SummaryChars:          utf8.RuneCountInString(preparedCase.Context.Summary),
 			SessionStateChars:     utf8.RuneCountInString(preparedCase.Context.SessionState),
@@ -140,6 +210,10 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 			PromptContextChars:    casePromptContextChars(preparedCase),
 			CurrentRequestPresent: strings.TrimSpace(preparedCase.Query) != "",
 		},
+	}
+	if opts.Mode == ModeEvidenceAblation {
+		result.ReviewID = "review-" + digestText(opts.RunID + "|" + result.PairID + "|" + string(opts.EvidenceMode))[:16]
+		result.Pilot = attempt <= 5
 	}
 	if opts.Mode == ModeContextStress {
 		spec := normalizeContextStressSpec(preparedCase.ContextStress)
@@ -163,12 +237,14 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 	if opts.Mode == ModeQueryResultPressure && !opts.RealModel {
 		pressureModel = newQueryResultPressureModel()
 	}
-	agentOptions := optionsForCase(preparedCase, opts, stressModel, pressureModel)
+	payloads := &payloadRecorder{}
+	agentOptions := optionsForCase(preparedCase, opts, stressModel, pressureModel, payloads)
 	recorder := trace.NewRecorder()
 	runner, err := chat_pipeline.BuildChatAgentWithOptions(ctx, agentOptions)
 	if err != nil {
 		result.Error = err.Error()
 		finishResult(&result, recorder, startedAt)
+		recordPayloads(&result, payloads)
 		recordContextStressDiagnostics(&result, preparedCase, stressModel)
 		recordQueryResultPressureDiagnostics(&result, preparedCase, pressureModel)
 		result.Scores = ScoreCase(evalCase, result)
@@ -212,16 +288,51 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 		}
 		finishResult(&result, recorder, startedAt)
 	}
+	recordPayloads(&result, payloads)
 	recordContextStressDiagnostics(&result, preparedCase, stressModel)
 	recordQueryResultPressureDiagnostics(&result, preparedCase, pressureModel)
 	if opts.EnableJudge {
 		result.Judge = JudgeCase(ctx, evalCase, result)
 	}
+	if opts.Mode == ModeEvidenceAblation {
+		normalized := normalizeAblationClaims(evalCase, result)
+		if opts.EnableJudge {
+			modelNormalized, normalizeErr := normalizeAblationClaimsWithModel(ctx, evalCase, result)
+			if normalizeErr == nil {
+				normalized = modelNormalized
+			} else {
+				normalized.NormalizerError = normalizeErr.Error()
+				normalized.Normalizer = "deterministic_atomic_v1_fallback"
+			}
+		}
+		result.NormalizedClaims = &normalized
+		score := scoreAblationCase(evalCase, result, normalized)
+		result.AblationScore = &score
+	}
 	result.Scores = ScoreCase(evalCase, result)
 	return result, nil
 }
 
+func ablationContextNoise(maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	unit := " UNRELATED_ARCHIVE inventory cache eviction; shipping queue delay; DNS maintenance; certificate rotation; image resize backlog."
+	var builder strings.Builder
+	for builder.Len() < maxChars {
+		builder.WriteString(unit)
+	}
+	value := builder.String()
+	if len(value) > maxChars {
+		value = value[:maxChars]
+	}
+	return value
+}
+
 func shouldRunStructuredClaimPipeline(evalCase Case, opts RunOptions) bool {
+	if opts.Mode == ModeEvidenceAblation {
+		return opts.EvidenceMode == EvidenceModeFull && (opts.RealModel || evalCase.Claims != nil)
+	}
 	if evalCase.Claims != nil {
 		return true
 	}
@@ -249,7 +360,7 @@ func buildUserMessage(evalCase Case, conversationID string) *chat_pipeline.UserM
 	}
 }
 
-func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressModel, pressureModel *queryResultPressureModel) chat_pipeline.ChatAgentOptions {
+func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressModel, pressureModel *queryResultPressureModel, payloads *payloadRecorder) chat_pipeline.ChatAgentOptions {
 	switch opts.Mode {
 	case ModeContract:
 		noRetries := 0
@@ -298,9 +409,75 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 			options.ChatModel = pressureModel
 		}
 		return options
+	case ModeEvidenceAblation:
+		noRetries := 0
+		options := chat_pipeline.ChatAgentOptions{
+			Tools:             fixtureToolsForMode(evalCase.ToolFixtures, opts.EvidenceMode, payloads),
+			MaxIterations:     8,
+			ModelRetries:      &noRetries,
+			DisableToolSearch: true,
+			EvalEvidenceMode:  string(opts.EvidenceMode),
+			AgentScope:        evidenceAblationAgentScope(evalCase.ToolFixtures),
+		}
+		if !opts.RealModel {
+			options.ChatModel = newScriptedModel(evalCase.ModelSteps)
+			options.MaxIterations = len(evalCase.ModelSteps) + 2
+		}
+		return options
 	default:
 		return chat_pipeline.ChatAgentOptions{}
 	}
+}
+
+// Database tools are intentionally hidden from the coordinator in production.
+// A database-only eval fixture therefore runs with the same narrow database
+// scope that a real database sub-agent would receive.
+func evidenceAblationAgentScope(fixtures []ToolFixture) authz.AgentScope {
+	if len(fixtures) == 0 {
+		return ""
+	}
+	for _, fixture := range fixtures {
+		switch strings.TrimSpace(fixture.Name) {
+		case "db_server_health", "db_active_queries", "db_wait_events", "db_locks", "db_slow_queries":
+			// Keep checking: mixed-domain fixture sets stay in coordinator scope.
+		default:
+			return ""
+		}
+	}
+	return authz.AgentScopeDatabase
+}
+
+func validEvidenceMode(mode EvidenceMode) bool {
+	for _, candidate := range EvidenceModes() {
+		if mode == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func recordPayloads(result *EvalCaseResult, payloads *payloadRecorder) {
+	if result == nil || payloads == nil {
+		return
+	}
+	result.CanonicalPayloadDigest,
+		result.ModelVisiblePayloadDigest,
+		result.ModelVisiblePayloadBytes,
+		result.ModelVisiblePayloadTokens = payloads.Snapshot()
+}
+
+func configuredEvalModelVersion(ctx context.Context, opts RunOptions) string {
+	if strings.TrimSpace(opts.ModelVersion) != "" {
+		return strings.TrimSpace(opts.ModelVersion)
+	}
+	value, err := g.Cfg().Get(ctx, "quick_chat_model.model")
+	if err == nil && value != nil && strings.TrimSpace(value.String()) != "" {
+		return strings.TrimSpace(value.String())
+	}
+	if opts.RealModel {
+		return "configured-model"
+	}
+	return "scripted-model"
 }
 
 func finishResult(result *EvalCaseResult, recorder *trace.Recorder, startedAt time.Time) {
@@ -315,13 +492,17 @@ func finishResult(result *EvalCaseResult, recorder *trace.Recorder, startedAt ti
 func toolEvidenceFromRecorder(items []trace.ToolEvidence) []ToolEvidence {
 	result := make([]ToolEvidence, 0, len(items))
 	for _, item := range items {
+		errorText := ""
+		if item.Envelope.Status != evidence.StatusSuccess {
+			errorText = item.Envelope.Summary
+		}
 		result = append(result, ToolEvidence{
 			Name:       item.ToolName,
 			Input:      item.InputJSON,
 			Output:     item.OutputJSON,
-			Status:     item.Status,
-			Error:      item.Envelope.Error,
-			EvidenceID: item.EvidenceID,
+			Status:     item.Status(),
+			Error:      errorText,
+			EvidenceID: item.EvidenceID(),
 		})
 	}
 	return result
@@ -508,18 +689,27 @@ func toolOutputStatus(output string) (status string, outputError string, evidenc
 	}
 
 	var envelope struct {
-		Success    *bool  `json:"success"`
-		Status     string `json:"status"`
-		Error      string `json:"error"`
-		EvidenceID string `json:"evidence_id"`
+		Status   string `json:"status"`
+		Error    string `json:"error"`
+		Summary  string `json:"summary"`
+		Evidence *struct {
+			EvidenceID string `json:"evidence_id"`
+		} `json:"evidence"`
 	}
 	if json.Unmarshal([]byte(normalizedOutput), &envelope) != nil {
 		return "success", "", ""
 	}
-	if (envelope.Success != nil && !*envelope.Success) || strings.EqualFold(envelope.Status, "error") {
-		return "error", envelope.Error, envelope.EvidenceID
+	evidenceID = ""
+	if envelope.Evidence != nil {
+		evidenceID = envelope.Evidence.EvidenceID
 	}
-	return "success", "", envelope.EvidenceID
+	if !strings.EqualFold(envelope.Status, evidence.StatusSuccess) {
+		if envelope.Summary == "" {
+			envelope.Summary = envelope.Error
+		}
+		return "error", envelope.Summary, evidenceID
+	}
+	return "success", "", evidenceID
 }
 
 func sanitizeID(value string) string {

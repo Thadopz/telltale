@@ -86,6 +86,8 @@ func TestCompleteTimeRange(t *testing.T) {
 		{name: "yesterday", query: "昨天告警", intent: IntentQuery, wantStart: time.Date(2026, 6, 7, 0, 0, 0, 0, fixedNow.Location()), wantEnd: time.Date(2026, 6, 7, 23, 59, 59, 0, fixedNow.Location())},
 		{name: "recent 30 minutes", query: "最近30分钟失败", intent: IntentDiagnose, wantStart: fixedNow.Add(-30 * time.Minute), wantEnd: fixedNow},
 		{name: "recent 2 hours", query: "最近2小时慢SQL", intent: IntentQuery, wantStart: fixedNow.Add(-2 * time.Hour), wantEnd: fixedNow},
+		{name: "past half hour", query: "过去半小时失败", intent: IntentDiagnose, wantStart: fixedNow.Add(-30 * time.Minute), wantEnd: fixedNow},
+		{name: "past 2 hours english", query: "past 2 hours failures", intent: IntentDiagnose, wantStart: fixedNow.Add(-2 * time.Hour), wantEnd: fixedNow},
 		{name: "default diagnosis", query: "支付失败", intent: IntentDiagnose, wantStart: fixedNow.Add(-30 * time.Minute), wantEnd: fixedNow},
 		{name: "chat no time", query: "hello", intent: IntentChat, wantNil: true},
 	}
@@ -103,6 +105,30 @@ func TestCompleteTimeRange(t *testing.T) {
 			}
 			if !got.Start.Equal(tt.wantStart) || !got.End.Equal(tt.wantEnd) {
 				t.Fatalf("expected %v-%v, got %v-%v", tt.wantStart, tt.wantEnd, got.Start, got.End)
+			}
+		})
+	}
+}
+
+func TestNeedsCurrentTime(t *testing.T) {
+	tests := []struct {
+		query string
+		want  bool
+	}{
+		{"检查当前支付失败", true},
+		{"今天支付失败", true},
+		{"过去半小时支付失败", true},
+		{"支付失败", true},
+		{"昨天支付失败", false},
+		{"查询支付回调处理手册", false},
+		{"解释什么是熔断", false},
+		{"hello", false},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			processed := Process(context.Background(), test.query, fixedNow)
+			if got := NeedsCurrentTime(processed); got != test.want {
+				t.Fatalf("NeedsCurrentTime()=%t, want %t; processed=%#v", got, test.want, processed)
 			}
 		})
 	}

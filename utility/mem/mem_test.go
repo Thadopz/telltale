@@ -1,8 +1,8 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -362,23 +362,16 @@ func TestFormatToolResults(t *testing.T) {
 }
 
 func TestFormatEnvelopeSummarySeparatesEvidenceAndFailedQuery(t *testing.T) {
-	success := formatEnvelopeSummary(evidence.Envelope{
-		Status:           evidence.StatusSuccess,
-		EvidenceID:       "ev_1_abcd1234",
-		CanUseAsEvidence: true,
-		DataStatus:       evidence.DataPresent,
-		Summary:          "query returned rows",
-	}, "")
+	successEnvelope := evidence.NewDataWithObservations(nil, "query returned rows", []evidence.Observation{{Kind: evidence.ObservationLogError}})
+	successEnvelope.Evidence.EvidenceID = "ev_1_abcd1234"
+	success := formatEnvelopeSummary(successEnvelope, "")
 	if !strings.Contains(success, "evidence_id=ev_1_abcd1234") {
 		t.Fatalf("expected evidence id in summary, got %q", success)
 	}
 
-	failed := formatEnvelopeSummary(evidence.Envelope{
-		Status:        evidence.StatusError,
-		FailedQueryID: "fq_1_abcd1234",
-		DataStatus:    evidence.DataUnknown,
-		Summary:       "query failed",
-	}, "")
+	failedEnvelope := evidence.NewError(nil, "query failed")
+	failedEnvelope.Failure.QueryID = "fq_1_abcd1234"
+	failed := formatEnvelopeSummary(failedEnvelope, "")
 	if !strings.Contains(failed, "failed_query_id=fq_1_abcd1234") {
 		t.Fatalf("expected failed query id in summary, got %q", failed)
 	}

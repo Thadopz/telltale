@@ -1,8 +1,11 @@
 package chat_pipeline
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestCoordinatorSystemPromptExcludesDomainToolInstructions(t *testing.T) {
@@ -19,6 +22,35 @@ func TestCoordinatorSystemPromptExcludesDomainToolInstructions(t *testing.T) {
 		if strings.Contains(prompt, name) {
 			t.Fatalf("coordinator prompt must not contain leaf tool %q", name)
 		}
+	}
+}
+
+func TestPromptKeepsDynamicContextAfterHistory(t *testing.T) {
+	template, err := newChatTemplate(context.Background())
+	if err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+	dynamic := dynamicSystemMessage("Current time: 2026-08-29T10:00:00+08:00")
+	messages, err := template.Format(context.Background(), map[string]any{
+		"project_context": "stable project rules",
+		"history": []*schema.Message{
+			schema.UserMessage("old question"),
+			schema.AssistantMessage("old answer", nil),
+		},
+		"turn_context": []*schema.Message{dynamic},
+		"content":      "current question",
+	})
+	if err != nil {
+		t.Fatalf("format template: %v", err)
+	}
+	if len(messages) != 5 {
+		t.Fatalf("expected system, history pair, dynamic system, and user; got %d messages", len(messages))
+	}
+	if messages[0].Role != schema.System || messages[1].Content != "old question" || messages[3].Role != schema.System || messages[4].Content != "current question" {
+		t.Fatalf("unexpected prompt order: %#v", messages)
+	}
+	if strings.Contains(messages[0].Content, "2026-08-29T10:00:00") || strings.Contains(messages[0].Content, "Request Analysis") {
+		t.Fatalf("stable system prompt contains volatile turn data: %q", messages[0].Content)
 	}
 }
 

@@ -53,7 +53,9 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "  sql <query>               inspect bounded SQL observations")
 	fmt.Fprintln(output, "  code search               search the controlled code snapshot")
 	fmt.Fprintln(output, "  watch [--once]            run anomaly watcher")
+	fmt.Fprintln(output, "  incident list|show        inspect watcher incidents and diagnoses")
 	fmt.Fprintln(output, "  knowledge index|recall    manage local knowledge")
+	fmt.Fprintln(output, "  memory flush             flush a conversation memory buffer")
 	fmt.Fprintln(output, "Global option: --config-dir PATH")
 }
 
@@ -80,8 +82,12 @@ func Run(ctx context.Context, args []string) error {
 		return runCode(ctx, commandArgs[1:], configDir, os.Stdout)
 	case "watch":
 		return runWatch(ctx, commandArgs[1:], configDir, os.Stdout)
+	case "incident":
+		return runIncident(ctx, commandArgs[1:], configDir, os.Stdout)
 	case "knowledge":
 		return runKnowledge(ctx, commandArgs[1:], configDir, os.Stdout)
+	case "memory":
+		return runMemory(ctx, commandArgs[1:], configDir, os.Stdout)
 	default:
 		return usageError(fmt.Errorf("unknown command %q", commandArgs[0]))
 	}

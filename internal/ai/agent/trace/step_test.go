@@ -11,13 +11,17 @@ import (
 
 func TestRecorderQualityCountsEvidenceAndToolFailures(t *testing.T) {
 	recorder := NewRecorder()
+	success := evidence.NewDataWithObservations(nil, "log result", []evidence.Observation{{Kind: evidence.ObservationLogError}})
+	success.Evidence.EvidenceID = "ev-1"
 	recorder.RecordToolEvidence(ToolEvidence{
 		ToolName: "query_logs",
-		Envelope: evidence.Envelope{EvidenceID: "ev-1", Status: "success"},
+		Envelope: success,
 	})
+	failure := evidence.NewError(nil, "metrics failed")
+	failure.Failure.QueryID = "fq-1"
 	recorder.RecordToolEvidence(ToolEvidence{
 		ToolName: "query_metrics",
-		Envelope: evidence.Envelope{FailedQueryID: "fq-1", Status: "error"},
+		Envelope: failure,
 	})
 
 	evidenceCount, failedToolCount := recorder.QualityCounts()
@@ -29,13 +33,26 @@ func TestRecorderQualityCountsEvidenceAndToolFailures(t *testing.T) {
 func TestModelTokenUsageReadsChatModelCallbackOutput(t *testing.T) {
 	info := &callbacks.RunInfo{Component: components.ComponentOfChatModel}
 	output := &model.CallbackOutput{TokenUsage: &model.TokenUsage{
-		PromptTokens:     120,
-		CompletionTokens: 30,
-		TotalTokens:      150,
+		PromptTokens:       120,
+		PromptTokenDetails: model.PromptTokenDetails{CachedTokens: 80},
+		CompletionTokens:   30,
+		TotalTokens:        150,
 	}}
 
-	promptTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
-	if promptTokens != 120 || completionTokens != 30 || totalTokens != 150 {
-		t.Fatalf("unexpected tokens: prompt=%d completion=%d total=%d", promptTokens, completionTokens, totalTokens)
+	promptTokens, cachedTokens, uncachedTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
+	if promptTokens != 120 || cachedTokens != 80 || uncachedTokens != 40 || completionTokens != 30 || totalTokens != 150 {
+		t.Fatalf("unexpected tokens: prompt=%d cached=%d uncached=%d completion=%d total=%d", promptTokens, cachedTokens, uncachedTokens, completionTokens, totalTokens)
+	}
+}
+
+func TestModelTokenUsageClampsInvalidCachedTokens(t *testing.T) {
+	info := &callbacks.RunInfo{Component: components.ComponentOfChatModel}
+	output := &model.CallbackOutput{TokenUsage: &model.TokenUsage{
+		PromptTokens:       120,
+		PromptTokenDetails: model.PromptTokenDetails{CachedTokens: 500},
+	}}
+	_, cachedTokens, uncachedTokens, _, _ := modelTokenUsage(info, output)
+	if cachedTokens != 120 || uncachedTokens != 0 {
+		t.Fatalf("expected cached tokens clamped to prompt tokens, got cached=%d uncached=%d", cachedTokens, uncachedTokens)
 	}
 }

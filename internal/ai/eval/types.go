@@ -14,7 +14,26 @@ const (
 	ModeSmoke               Mode = "smoke"
 	ModeContextStress       Mode = "context_stress"
 	ModeQueryResultPressure Mode = "query_result_pressure"
+	ModeEvidenceAblation    Mode = "evidence_ablation"
 )
+
+// EvidenceMode names the single experiment variable used by the ablation
+// runner. These values are intentionally not general Agent runtime modes.
+type EvidenceMode string
+
+const (
+	EvidenceModeFull              EvidenceMode = "full"
+	EvidenceModeVisibleUnenforced EvidenceMode = "visible_unenforced"
+	EvidenceModeRawUnenforced     EvidenceMode = "raw_unenforced"
+)
+
+func EvidenceModes() []EvidenceMode {
+	return []EvidenceMode{
+		EvidenceModeFull,
+		EvidenceModeVisibleUnenforced,
+		EvidenceModeRawUnenforced,
+	}
+}
 
 type ChatMessage struct {
 	Role    string `json:"role"`
@@ -104,6 +123,25 @@ type Expected struct {
 	ClaimCoverage       map[string]string   `json:"claim_coverage,omitempty"`
 }
 
+// AtomicTruth describes one evaluator-owned fact. MatchAny is used only by
+// the deterministic fallback normalizer and is never included in an Agent
+// prompt or a tool response.
+type AtomicTruth struct {
+	ID          string   `json:"id"`
+	Description string   `json:"description"`
+	MatchAny    []string `json:"match_any,omitempty"`
+	Critical    bool     `json:"critical,omitempty"`
+}
+
+type AblationTruth struct {
+	RootCause            string        `json:"root_cause"`
+	RootCauseMatchAny    []string      `json:"root_cause_match_any,omitempty"`
+	RequiredFacts        []AtomicTruth `json:"required_facts"`
+	AcceptableHypotheses []string      `json:"acceptable_hypotheses,omitempty"`
+	ForbiddenClaims      []AtomicTruth `json:"forbidden_claims,omitempty"`
+	ExpectedAbstention   bool          `json:"expected_abstention"`
+}
+
 type Case struct {
 	ID                  string                   `json:"id"`
 	Category            string                   `json:"category"`
@@ -116,6 +154,8 @@ type Case struct {
 	ContextStress       *ContextStressSpec       `json:"context_stress,omitempty"`
 	QueryResultPressure *QueryResultPressureSpec `json:"query_result_pressure,omitempty"`
 	Claims              *evidence.ClaimSet       `json:"claims,omitempty"`
+	Truth               *AblationTruth           `json:"truth,omitempty"`
+	AblationNoiseChars  int                      `json:"ablation_noise_chars,omitempty"`
 	Expected            Expected                 `json:"expected,omitempty"`
 }
 
@@ -194,29 +234,79 @@ type EvalScores struct {
 	Reasons       []string `json:"reasons,omitempty"`
 }
 
+type NormalizedAblationClaims struct {
+	RootCause            string                     `json:"root_cause,omitempty"`
+	ClaimedFactIDs       []string                   `json:"claimed_fact_ids,omitempty"`
+	ForbiddenIDs         []string                   `json:"forbidden_ids,omitempty"`
+	ForbiddenAssessments []ForbiddenClaimAssessment `json:"forbidden_assessments,omitempty"`
+	Abstained            bool                       `json:"abstained"`
+	Completed            bool                       `json:"completed"`
+	Normalizer           string                     `json:"normalizer"`
+	NormalizerError      string                     `json:"normalizer_error,omitempty"`
+	PromptTokens         int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens     int                        `json:"completion_tokens,omitempty"`
+	TotalTokens          int                        `json:"total_tokens,omitempty"`
+}
+
+// ForbiddenClaimAssessment keeps the model's decision auditable. Accepted is
+// set only after deterministic validation against the exact answer text.
+type ForbiddenClaimAssessment struct {
+	ForbiddenID     string `json:"forbidden_id"`
+	Asserted        bool   `json:"asserted"`
+	SupportingQuote string `json:"supporting_quote,omitempty"`
+	Polarity        string `json:"polarity"`
+	Accepted        bool   `json:"accepted"`
+	RejectionReason string `json:"rejection_reason,omitempty"`
+}
+
+type AblationCaseScore struct {
+	CaseCorrect           bool    `json:"case_correct"`
+	AccuracyScore         float64 `json:"accuracy_score"`
+	RootCauseCorrect      bool    `json:"root_cause_correct"`
+	FactPrecision         float64 `json:"fact_precision"`
+	FactRecall            float64 `json:"fact_recall"`
+	FactF1                float64 `json:"fact_f1"`
+	CriticalHallucination bool    `json:"critical_hallucination"`
+	WrongAttribution      bool    `json:"wrong_attribution"`
+	AbstentionCorrect     bool    `json:"abstention_correct"`
+	ToolSelectionCorrect  bool    `json:"tool_selection_correct"`
+	TaskCompleted         bool    `json:"task_completed"`
+}
+
 type EvalCaseResult struct {
-	ID                   string                    `json:"id"`
-	Attempt              int                       `json:"attempt"`
-	Variant              string                    `json:"variant,omitempty"`
-	Category             string                    `json:"category"`
-	Mode                 Mode                      `json:"mode"`
-	Query                string                    `json:"query"`
-	ConversationID       string                    `json:"conversation_id"`
-	Context              ContextEvidence           `json:"context"`
-	Metrics              ExecutionMetrics          `json:"metrics"`
-	Judge                JudgeResult               `json:"judge"`
-	ToolCalls            []ToolEvidence            `json:"tool_calls,omitempty"`
-	TraceSteps           []trace.AgentStep         `json:"trace_steps,omitempty"`
-	Answer               string                    `json:"answer"`
-	DraftAnswer          string                    `json:"draft_answer,omitempty"`
-	ClaimSet             *evidence.ClaimSet        `json:"claim_set,omitempty"`
-	CoverageReports      []evidence.CoverageReport `json:"coverage_reports,omitempty"`
-	ClaimExtractionError string                    `json:"claim_extraction_error,omitempty"`
-	LocalizationMode     string                    `json:"localization_mode,omitempty"`
-	Error                string                    `json:"error,omitempty"`
-	ElapsedMS            int64                     `json:"elapsed_ms"`
-	Scores               EvalScores                `json:"scores"`
-	StartedAt            time.Time                 `json:"started_at"`
+	ID                        string                    `json:"id"`
+	Attempt                   int                       `json:"attempt"`
+	Variant                   string                    `json:"variant,omitempty"`
+	EvidenceMode              EvidenceMode              `json:"evidence_mode,omitempty"`
+	PairID                    string                    `json:"pair_id,omitempty"`
+	ReviewID                  string                    `json:"review_id,omitempty"`
+	Pilot                     bool                      `json:"pilot,omitempty"`
+	Category                  string                    `json:"category"`
+	Mode                      Mode                      `json:"mode"`
+	Query                     string                    `json:"query"`
+	ConversationID            string                    `json:"conversation_id"`
+	Context                   ContextEvidence           `json:"context"`
+	Metrics                   ExecutionMetrics          `json:"metrics"`
+	Judge                     JudgeResult               `json:"judge"`
+	ToolCalls                 []ToolEvidence            `json:"tool_calls,omitempty"`
+	TraceSteps                []trace.AgentStep         `json:"trace_steps,omitempty"`
+	Answer                    string                    `json:"answer"`
+	DraftAnswer               string                    `json:"draft_answer,omitempty"`
+	ClaimSet                  *evidence.ClaimSet        `json:"claim_set,omitempty"`
+	CoverageReports           []evidence.CoverageReport `json:"coverage_reports,omitempty"`
+	ClaimExtractionError      string                    `json:"claim_extraction_error,omitempty"`
+	LocalizationMode          string                    `json:"localization_mode,omitempty"`
+	Error                     string                    `json:"error,omitempty"`
+	ElapsedMS                 int64                     `json:"elapsed_ms"`
+	ModelVersion              string                    `json:"model_version,omitempty"`
+	CanonicalPayloadDigest    string                    `json:"canonical_payload_digest,omitempty"`
+	ModelVisiblePayloadDigest string                    `json:"model_visible_payload_digest,omitempty"`
+	ModelVisiblePayloadBytes  int                       `json:"model_visible_payload_bytes,omitempty"`
+	ModelVisiblePayloadTokens int                       `json:"model_visible_payload_tokens,omitempty"`
+	NormalizedClaims          *NormalizedAblationClaims `json:"normalized_claims,omitempty"`
+	AblationScore             *AblationCaseScore        `json:"ablation_score,omitempty"`
+	Scores                    EvalScores                `json:"scores"`
+	StartedAt                 time.Time                 `json:"started_at"`
 }
 
 type RunSummary struct {
@@ -246,11 +336,73 @@ type RunSummary struct {
 	KnowledgeUsed        int                `json:"knowledge_used"`
 	FailureReasons       []string           `json:"failure_reasons,omitempty"`
 	CasePassRates        map[string]float64 `json:"case_pass_rates"`
+	Ablation             *AblationSummary   `json:"ablation,omitempty"`
+}
+
+type AblationGroupSummary struct {
+	Mode                      EvidenceMode `json:"mode"`
+	Runs                      int          `json:"runs"`
+	Blocked                   int          `json:"blocked"`
+	Accuracy                  float64      `json:"accuracy"`
+	AccuracyCILow             float64      `json:"accuracy_ci_low"`
+	AccuracyCIHigh            float64      `json:"accuracy_ci_high"`
+	MeanAccuracyScore         float64      `json:"mean_accuracy_score"`
+	MeanFactF1                float64      `json:"mean_fact_f1"`
+	CriticalHallucinationRate float64      `json:"critical_hallucination_rate"`
+	CorrectAbstentionRate     float64      `json:"correct_abstention_rate"`
+	CompletionRate            float64      `json:"completion_rate"`
+	AverageTokens             float64      `json:"average_tokens"`
+	AverageLatencyMS          float64      `json:"average_latency_ms"`
+}
+
+type AblationComparison struct {
+	Left          EvidenceMode `json:"left"`
+	Right         EvidenceMode `json:"right"`
+	Pairs         int          `json:"pairs"`
+	MissingPairs  int          `json:"missing_pairs"`
+	AccuracyDelta float64      `json:"accuracy_delta"`
+	CILow         float64      `json:"ci_low"`
+	CIHigh        float64      `json:"ci_high"`
+	McNemarP      float64      `json:"mcnemar_p"`
+	HolmAdjustedP float64      `json:"holm_adjusted_p"`
+	Significant   bool         `json:"significant"`
+}
+
+type AblationSummary struct {
+	BootstrapSamples  int                    `json:"bootstrap_samples"`
+	Groups            []AblationGroupSummary `json:"groups"`
+	Comparisons       []AblationComparison   `json:"comparisons"`
+	Strata            []AblationStratum      `json:"strata,omitempty"`
+	ErrorCounts       []AblationErrorCount   `json:"error_counts,omitempty"`
+	Conclusion        string                 `json:"conclusion"`
+	ReviewerAgreement *ReviewerAgreement     `json:"reviewer_agreement,omitempty"`
+}
+
+type AblationStratum struct {
+	Dimension string                 `json:"dimension"`
+	Value     string                 `json:"value"`
+	Groups    []AblationGroupSummary `json:"groups"`
+}
+
+type AblationErrorCount struct {
+	Mode      EvidenceMode `json:"mode"`
+	ErrorType string       `json:"error_type"`
+	Count     int          `json:"count"`
+}
+
+type ReviewerAgreement struct {
+	Reviewed                  int     `json:"reviewed"`
+	Eligible                  int     `json:"eligible"`
+	ReviewFraction            float64 `json:"review_fraction"`
+	CohensKappa               float64 `json:"cohens_kappa"`
+	Reliable                  bool    `json:"reliable"`
+	RecommendedReviewFraction float64 `json:"recommended_review_fraction"`
 }
 
 type RunOptions struct {
 	Mode                 Mode
 	CasesPath            string
+	CaseIDs              []string
 	ReportsDir           string
 	RunID                string
 	CaseTimeoutSeconds   int
@@ -258,12 +410,18 @@ type RunOptions struct {
 	MinimumPassRate      float64
 	EnableJudge          bool
 	RealModel            bool
+	ModelVersion         string
 	ContextStressVariant string
+	EvidenceMode         EvidenceMode
+	BootstrapSamples     int
+	RandomSeed           int64
+	HumanReviewPath      string
 }
 
 type RunResult struct {
-	Summary      RunSummary
-	Results      []EvalCaseResult
-	JSONLPath    string
-	MarkdownPath string
+	Summary         RunSummary
+	Results         []EvalCaseResult
+	JSONLPath       string
+	MarkdownPath    string
+	BlindReviewPath string
 }

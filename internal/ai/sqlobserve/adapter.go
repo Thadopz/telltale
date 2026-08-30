@@ -11,6 +11,28 @@ func newMysqlAdapter() DatabaseAdapter {
 	return mysqlAdapter{}
 }
 
+type postgresqlAdapter struct{}
+
+func newPostgreSQLAdapter() DatabaseAdapter {
+	return postgresqlAdapter{}
+}
+
+func (postgresqlAdapter) Engine() DatabaseEngine {
+	return EnginePostgreSQL
+}
+
+func (postgresqlAdapter) Supports(kind QueryKind) bool {
+	return kind == QuerySlowSQL
+}
+
+func (postgresqlAdapter) BuildPlan(request QueryRequest, budget ResultBudget) (QueryPlan, error) {
+	return buildPostgreSQLHistoryPlan(request, budget)
+}
+
+func (postgresqlAdapter) OpenExecutor(ctx context.Context, target string) (QueryExecutor, error) {
+	return openConfiguredPostgreSQLExecutor(ctx, target)
+}
+
 func (mysqlAdapter) Engine() DatabaseEngine {
 	return EngineMySQL
 }
@@ -71,6 +93,20 @@ func normalizeMySQLRequest(request QueryRequest) QueryRequest {
 	request.SortBy = strings.ToLower(strings.TrimSpace(request.SortBy))
 	if request.Source == "auto" {
 		request.Source = ""
+	}
+	if request.ResolvedTimeRange != nil {
+		request.Source = "slow_log"
+		switch request.SortBy {
+		case "", "latency", "avg_latency", "total_latency":
+			request.SortBy = "query_time"
+		case "resource":
+			request.SortBy = "rows_examined"
+		case "frequency", "exec_count":
+			// mysql.slow_log contains individual records and cannot provide a
+			// trustworthy frequency ranking for an exact time range.
+			request.SortBy = "unsupported_frequency"
+		}
+		return request
 	}
 
 	// These are stable, database-neutral modes exposed to the Agent. The

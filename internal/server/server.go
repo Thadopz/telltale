@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -51,7 +52,21 @@ func Run(ctx context.Context, runtime *runtimepkg.Runtime, options Options) erro
 		group.Bind(chat.NewV1WithDiagnostic(runtime.Diagnostic))
 	})
 	s.SetAddr(address)
+	workerContext, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
+	workerDone := make(chan error, 1)
+	if runtime.Memory != nil {
+		go func() {
+			workerDone <- runtime.Memory.Run(workerContext)
+		}()
+	}
 	s.Run()
+	stopWorker()
+	if runtime.Memory != nil {
+		if workerErr := <-workerDone; workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+			return fmt.Errorf("memory worker: %w", workerErr)
+		}
+	}
 	return nil
 }
 

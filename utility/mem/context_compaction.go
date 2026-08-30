@@ -1,8 +1,8 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"context"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"regexp"
 	"sort"
 	"strings"

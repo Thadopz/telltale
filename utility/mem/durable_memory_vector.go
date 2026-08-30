@@ -1,10 +1,10 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/embedder"
-	"github.com/Thadopz/telltale/internal/ai/vectorstore"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/embedder"
+	"github.com/Thadopz/telltale/internal/ai/vectorstore"
 	"math"
 	"strings"
 )

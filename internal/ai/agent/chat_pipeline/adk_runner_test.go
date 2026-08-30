@@ -31,7 +31,7 @@ func (m *testADKModel) Generate(_ context.Context, messages []*schema.Message, _
 	return schema.AssistantMessage("diagnosis complete", nil), nil
 }
 
-func TestChatPipelineSendsOneSystemMessageToCoordinator(t *testing.T) {
+func TestChatPipelineKeepsDynamicSystemMessageAfterStablePrefix(t *testing.T) {
 	ctx := context.Background()
 	chatModel := &testADKModel{}
 	runner, err := BuildChatAgentWithOptions(ctx, ChatAgentOptions{
@@ -54,8 +54,14 @@ func TestChatPipelineSendsOneSystemMessageToCoordinator(t *testing.T) {
 			systemMessages++
 		}
 	}
-	if systemMessages != 1 {
-		t.Fatalf("expected one system message, got %d in %#v", systemMessages, chatModel.generatedMessages)
+	if systemMessages != 2 {
+		t.Fatalf("expected stable and dynamic system messages, got %d in %#v", systemMessages, chatModel.generatedMessages)
+	}
+	if len(chatModel.generatedMessages) < 2 || chatModel.generatedMessages[0].Extra[dynamicContextMessageKey] == true {
+		t.Fatalf("first system message must be the stable prefix: %#v", chatModel.generatedMessages)
+	}
+	if dynamic, _ := chatModel.generatedMessages[1].Extra[dynamicContextMessageKey].(bool); !dynamic {
+		t.Fatalf("second system message must contain late turn context: %#v", chatModel.generatedMessages)
 	}
 }
 

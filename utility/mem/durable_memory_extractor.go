@@ -1,10 +1,10 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/models"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/models"
 	"regexp"
 	"strings"
 	"time"

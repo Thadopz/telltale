@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
 	"gorm.io/driver/mysql"
@@ -34,12 +35,25 @@ func openConfiguredMysqlExecutor(ctx context.Context, target string) (QueryExecu
 	return &gormQueryExecutor{db: db, sqlDB: sqlDB}, nil
 }
 
-func (executor *gormQueryExecutor) Query(ctx context.Context, sql string) ([]map[string]any, error) {
+func (executor *gormQueryExecutor) Query(ctx context.Context, sql string, args ...any) ([]map[string]any, error) {
 	var rows []map[string]any
-	if err := executor.db.WithContext(ctx).Raw(sql).Scan(&rows).Error; err != nil {
+	if err := executor.db.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (executor *gormQueryExecutor) CurrentTime(ctx context.Context) (time.Time, error) {
+	var result struct {
+		Now time.Time `gorm:"column:current_time"`
+	}
+	if err := executor.db.WithContext(ctx).Raw("SELECT CURRENT_TIMESTAMP AS current_time").Scan(&result).Error; err != nil {
+		return time.Time{}, fmt.Errorf("read database current timestamp: %w", err)
+	}
+	if result.Now.IsZero() {
+		return time.Time{}, fmt.Errorf("database returned an empty current timestamp")
+	}
+	return result.Now.UTC(), nil
 }
 
 func (executor *gormQueryExecutor) Close() error {

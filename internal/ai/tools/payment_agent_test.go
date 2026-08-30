@@ -67,8 +67,8 @@ func TestQueryPaymentAnomalyToolCallsAgent(t *testing.T) {
 		t.Fatalf("expected anomaly response in output, got %s", out)
 	}
 	parsed := evidence.Parse(out).Envelope
-	if len(parsed.Observations) != 1 || parsed.Observations[0].Kind != evidence.ObservationMetricAnomaly {
-		t.Fatalf("expected payment anomaly observation, got %#v", parsed.Observations)
+	if parsed.Evidence == nil || len(parsed.Evidence.Observations) != 1 || parsed.Evidence.Observations[0].Kind != evidence.ObservationMetricAnomaly {
+		t.Fatalf("expected payment anomaly observation, got %#v", parsed.Evidence)
 	}
 }
 

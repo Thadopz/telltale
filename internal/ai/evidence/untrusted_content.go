@@ -55,15 +55,16 @@ func SanitizeUntrustedValue(value any) any {
 // SanitizeUntrustedEnvelope preserves the structured result while making
 // instruction-shaped content inert before it reaches the model.
 func SanitizeUntrustedEnvelope(envelope Envelope) Envelope {
-	envelope.Message = SanitizeUntrustedText(envelope.Message)
 	envelope.Summary = SanitizeUntrustedText(envelope.Summary)
-	envelope.Error = SanitizeUntrustedText(envelope.Error)
 	envelope.Data = SanitizeUntrustedValue(envelope.Data)
-
-	envelope.Subject = sanitizeSubject(envelope.Subject)
-	envelope.Scope = sanitizeScope(envelope.Scope)
-	for index := range envelope.Observations {
-		observation := &envelope.Observations[index]
+	if envelope.Failure != nil {
+		envelope.Failure.Reason = SanitizeUntrustedText(envelope.Failure.Reason)
+	}
+	if envelope.Evidence == nil {
+		return envelope
+	}
+	for index := range envelope.Evidence.Observations {
+		observation := &envelope.Evidence.Observations[index]
 		observation.Subject = sanitizeSubject(observation.Subject)
 		observation.Scope = sanitizeScope(observation.Scope)
 		observation.Fields = sanitizeStringMapValues(observation.Fields)

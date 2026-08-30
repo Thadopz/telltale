@@ -399,7 +399,7 @@ func matchClaimFields(claim CandidateClaim, evidenceItems []EvidenceItem) ([]Fie
 	return matches, missing, conflicts
 }
 
-func observationFieldValue(item EvidenceItem, observation Observation, key string) (string, bool) {
+func observationFieldValue(_ EvidenceItem, observation Observation, key string) (string, bool) {
 	if value, ok := observation.Fields[key]; ok {
 		return strings.TrimSpace(toString(value)), true
 	}
@@ -407,12 +407,6 @@ func observationFieldValue(item EvidenceItem, observation Observation, key strin
 		return strings.TrimSpace(value), true
 	}
 	if value, ok := observation.Scope.Fields[key]; ok {
-		return strings.TrimSpace(value), true
-	}
-	if value, ok := item.Subject.Fields[key]; ok {
-		return strings.TrimSpace(value), true
-	}
-	if value, ok := item.Scope.Fields[key]; ok {
 		return strings.TrimSpace(value), true
 	}
 	return "", false
@@ -481,7 +475,7 @@ func relatedEvidence(claim CandidateClaim, evidenceItems []EvidenceItem) []Evide
 			}
 			continue
 		}
-		if scopeRelated(claim.Scope, item) && (subjectRelated(claim.Subject, item.Subject) || observationsRelated(claim.Subject, item.Observations) || claim.Subject.Service == "") {
+		if scopeRelated(claim.Scope, item) && (observationsRelated(claim.Subject, item.Observations) || claim.Subject.Service == "") {
 			out = append(out, item)
 		}
 	}
@@ -515,49 +509,37 @@ func subjectRelated(claimSubject SubjectRef, evidenceSubject SubjectRef) bool {
 }
 
 func scopeRelated(claimScope EvidenceScope, item EvidenceItem) bool {
+	for _, observation := range item.Observations {
+		if scopeRefRelated(claimScope, observation.Scope) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeRefRelated(claimScope EvidenceScope, actualScope EvidenceScope) bool {
 	if claimScope.TimeRange != "" {
-		if actual, ok := evidenceScopeValue(item, "time_range"); ok && !strings.EqualFold(claimScope.TimeRange, actual) {
+		if actualScope.TimeRange != "" && !strings.EqualFold(claimScope.TimeRange, actualScope.TimeRange) {
 			return false
 		}
 	}
 	if claimScope.StartTime != "" {
-		if actual, ok := evidenceScopeValue(item, "start_time"); ok && !strings.EqualFold(claimScope.StartTime, actual) {
+		if actualScope.StartTime != "" && !strings.EqualFold(claimScope.StartTime, actualScope.StartTime) {
 			return false
 		}
 	}
 	if claimScope.EndTime != "" {
-		if actual, ok := evidenceScopeValue(item, "end_time"); ok && !strings.EqualFold(claimScope.EndTime, actual) {
+		if actualScope.EndTime != "" && !strings.EqualFold(claimScope.EndTime, actualScope.EndTime) {
 			return false
 		}
 	}
 	for key, expected := range claimScope.Fields {
-		actual, ok := evidenceScopeValue(item, key)
+		actual, ok := actualScope.Fields[key]
 		if !ok || !strings.EqualFold(expected, actual) {
 			return false
 		}
 	}
 	return true
-}
-
-func evidenceScopeValue(item EvidenceItem, key string) (string, bool) {
-	if value, ok := item.Scope.Fields[key]; ok {
-		return strings.TrimSpace(value), true
-	}
-	for _, observation := range item.Observations {
-		if value, ok := observation.Scope.Fields[key]; ok {
-			return strings.TrimSpace(value), true
-		}
-	}
-	switch key {
-	case "time_range":
-		return item.Scope.TimeRange, item.Scope.TimeRange != ""
-	case "start_time":
-		return item.Scope.StartTime, item.Scope.StartTime != ""
-	case "end_time":
-		return item.Scope.EndTime, item.Scope.EndTime != ""
-	default:
-		return "", false
-	}
 }
 
 func findRequirementMatch(req FieldRequirement, evidenceItems []EvidenceItem) (FieldMatch, bool) {

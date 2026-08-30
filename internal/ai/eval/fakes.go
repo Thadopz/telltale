@@ -2,6 +2,8 @@ package eval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +11,6 @@ import (
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -17,7 +18,48 @@ import (
 )
 
 type fixtureTool struct {
-	fixture ToolFixture
+	fixture  ToolFixture
+	mode     EvidenceMode
+	payloads *payloadRecorder
+}
+
+type payloadRecorder struct {
+	mu        sync.Mutex
+	canonical []string
+	visible   []string
+}
+
+func (r *payloadRecorder) Record(toolName string, canonical string, visible string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.canonical = append(r.canonical, toolName+"\x00"+canonical)
+	r.visible = append(r.visible, toolName+"\x00"+visible)
+}
+
+func (r *payloadRecorder) Snapshot() (canonicalDigest string, visibleDigest string, visibleBytes int, visibleTokens int) {
+	if r == nil {
+		return "", "", 0, 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	canonical := strings.Join(r.canonical, "\x1e")
+	visible := strings.Join(r.visible, "\x1e")
+	return digestText(canonical), digestText(visible), len([]byte(visible)), estimateTextTokens(visible)
+}
+
+func digestText(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func estimateTextTokens(value string) int {
+	if value == "" {
+		return 0
+	}
+	return (len([]rune(value)) + 3) / 4
 }
 
 type fixtureClaimExtractor struct {
@@ -42,23 +84,70 @@ func (t fixtureTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (t fixtureTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
 	if t.fixture.Error != "" {
-		return `{"success":false,"status":"error","error":"` + escapeJSONString(t.fixture.Error) + `"}`, nil
+		output := evidence.Marshal(evidence.NewError(nil, "fixture tool failed"))
+		t.payloads.Record(t.fixture.Name, t.fixture.Error, output)
+		return output, nil
 	}
 	if t.fixture.Output != "" {
+		if t.mode == EvidenceModeRawUnenforced {
+			output := rawFixtureProjection(t.fixture.Output)
+			t.payloads.Record(t.fixture.Name, t.fixture.Output, output)
+			return output, nil
+		}
 		parsed := evidence.Parse(t.fixture.Output)
-		if parsed.IsJSON && parsed.Envelope.Status == evidence.StatusSuccess && len(parsed.Envelope.Observations) > 0 {
+		if _, ok := parsed.Envelope.UsableEvidence(); parsed.IsJSON && ok {
 			parsed.Envelope = evidence.SanitizeUntrustedEnvelope(parsed.Envelope)
 			parsed.Envelope = evidence.MarkLocalFixtureEnvelope(parsed.Envelope, evidence.IssueMetadata{
-				Issuer:       "eval:fixture",
-				RunID:        evidence.RunIDFromContext(ctx),
-				TrustLevel:   evidence.ContentTrustTrustedLocal,
-				ExpiresAfter: 10 * time.Minute,
+				Issuer:     "eval:fixture",
+				RunID:      evidence.RunIDFromContext(ctx),
+				TrustLevel: evidence.ContentTrustTrustedLocal,
 			})
-			return evidence.Marshal(parsed.Envelope), nil
+			output := evidence.Marshal(parsed.Envelope)
+			t.payloads.Record(t.fixture.Name, t.fixture.Output, output)
+			return output, nil
 		}
-		return evidence.SanitizeUntrustedJSON(t.fixture.Output), nil
+		output := evidence.SanitizeUntrustedJSON(t.fixture.Output)
+		t.payloads.Record(t.fixture.Name, t.fixture.Output, output)
+		return output, nil
 	}
-	return `{"success":true,"status":"success","message":"fixture tool executed"}`, nil
+	output := evidence.Marshal(evidence.NewData(nil, "fixture tool executed"))
+	t.payloads.Record(t.fixture.Name, "", output)
+	return output, nil
+}
+
+// rawFixtureProjection keeps the business payload and summary while removing
+// all evidence identity, trust, observation, scope, and coverage metadata. It
+// never queries the source again.
+func rawFixtureProjection(input string) string {
+	var source struct {
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data"`
+		Summary string          `json:"summary"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal([]byte(input), &source) != nil {
+		return evidence.SanitizeUntrustedJSON(input)
+	}
+	if source.Status == "" {
+		source.Status = evidence.StatusUnknown
+	}
+	if source.Summary == "" {
+		source.Summary = source.Message
+	}
+	projection := struct {
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data,omitempty"`
+		Summary string          `json:"summary,omitempty"`
+	}{
+		Status:  source.Status,
+		Data:    source.Data,
+		Summary: source.Summary,
+	}
+	encoded, err := json.Marshal(projection)
+	if err != nil {
+		return `{"status":"protocol_error","summary":"fixture projection failed"}`
+	}
+	return string(encoded)
 }
 
 type scriptedModel struct {
@@ -228,9 +317,13 @@ func (m *scriptedModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatMode
 }
 
 func fixtureTools(fixtures []ToolFixture) []tool.BaseTool {
+	return fixtureToolsForMode(fixtures, EvidenceModeFull, nil)
+}
+
+func fixtureToolsForMode(fixtures []ToolFixture, mode EvidenceMode, payloads *payloadRecorder) []tool.BaseTool {
 	tools := make([]tool.BaseTool, 0, len(fixtures))
 	for _, fixture := range fixtures {
-		tools = append(tools, fixtureTool{fixture: fixture})
+		tools = append(tools, fixtureTool{fixture: fixture, mode: mode, payloads: payloads})
 	}
 	return tools
 }

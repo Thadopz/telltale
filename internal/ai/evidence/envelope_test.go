@@ -1,93 +1,90 @@
 package evidence
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 )
 
-func TestNewDataCreatesUsableEvidence(t *testing.T) {
-	raw := Marshal(NewData([]string{"row"}, "found rows"))
-	var env Envelope
-	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
+func TestNewDataWithoutObservationsIsSuccessfulButNotEvidence(t *testing.T) {
+	env := Parse(Marshal(NewData([]string{"row"}, "found rows"))).Envelope
+	if env.Status != StatusSuccess || env.ProtocolVersion != ProtocolVersion {
+		t.Fatalf("expected protocol v2 success, got %#v", env)
 	}
-	if !env.Success || env.Status != StatusSuccess {
-		t.Fatalf("expected success envelope, got %#v", env)
-	}
-	if !env.CanUseAsEvidence || !strings.HasPrefix(env.EvidenceID, "ev_") {
-		t.Fatalf("expected usable evidence id, got %#v", env)
+	if _, ok := env.UsableEvidence(); ok || env.Evidence != nil {
+		t.Fatalf("plain data must not become evidence, got %#v", env.Evidence)
 	}
 	if env.DataStatus != DataPresent {
 		t.Fatalf("expected present data, got %q", env.DataStatus)
 	}
 }
 
-func TestNewDataWithObservationsKeepsStructuredFields(t *testing.T) {
-	raw := Marshal(NewDataWithObservations([]string{"row"}, "found rows", []Observation{{
+func TestNewDataWithObservationsCreatesEvidencePayload(t *testing.T) {
+	env := Parse(Marshal(NewDataWithObservations([]string{"row"}, "found rows", []Observation{{
 		Kind:    ObservationMetricAnomaly,
 		Subject: SubjectRef{Type: "payment", Service: "payment"},
 		Fields:  map[string]any{"metric_name": "payment_failed_rate"},
-	}}))
-	var env Envelope
-	if err := json.Unmarshal([]byte(raw), &env); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
+	}}))).Envelope
+	record, ok := env.UsableEvidence()
+	if !ok || !strings.HasPrefix(record.EvidenceID, "ev_") {
+		t.Fatalf("expected usable evidence payload, got %#v", env)
 	}
-	if len(env.Observations) != 1 || env.Observations[0].Kind != ObservationMetricAnomaly {
-		t.Fatalf("expected structured observation, got %#v", env.Observations)
+	if len(record.Observations) != 1 || record.Observations[0].Subject.Service != "payment" {
+		t.Fatalf("expected observation-owned subject, got %#v", record.Observations)
 	}
-	if env.Subject.Service != "payment" {
-		t.Fatalf("expected subject from observation, got %#v", env.Subject)
-	}
-	if env.SourceKind != SourceRuntimeMetric || !env.RuntimeVerified {
-		t.Fatalf("expected runtime metric provenance, got source=%q verified=%t", env.SourceKind, env.RuntimeVerified)
+	if record.Provenance.SourceKind != SourceRuntimeMetric || !record.Provenance.RuntimeVerified {
+		t.Fatalf("expected runtime metric provenance, got %#v", record.Provenance)
 	}
 }
 
-func TestStaticEvidenceKeepsUntrustedUnverifiedProvenance(t *testing.T) {
-	env := NewDataWithObservations("snippet", "static source", []Observation{{
-		Kind:    ObservationStaticCodeDeclaration,
-		Subject: SubjectRef{Type: "code", Service: "card-service"},
-	}})
-	env.SourceKind = SourceStaticCode
-	env.Repository = "card_service"
-	env.Revision = "rev-a"
-	env.SnapshotDigest = "digest-a"
-	env.VersionAlignment = VersionMismatch
-	env.RuntimeVerified = false
-	env.ContentTrust = ContentTrustUntrustedRepository
-	parsed := Parse(Marshal(env)).Envelope
-	if parsed.SourceKind != SourceStaticCode || parsed.RuntimeVerified || parsed.ContentTrust != ContentTrustUntrustedRepository {
-		t.Fatalf("expected static provenance to survive round trip, got %#v", parsed)
+func TestStaticEvidenceKeepsNestedProvenance(t *testing.T) {
+	env := NewDataWithObservations("snippet", "static source", []Observation{{Kind: ObservationStaticCodeDeclaration}})
+	env.Evidence.Provenance = Provenance{
+		SourceKind: SourceStaticCode, Repository: "card_service", Revision: "rev-a",
+		SnapshotDigest: "digest-a", VersionAlignment: VersionMismatch,
+		PayloadTrust: ContentTrustUntrustedRepository,
 	}
-	if parsed.VersionAlignment != VersionMismatch || parsed.SnapshotDigest != "digest-a" {
-		t.Fatalf("expected snapshot metadata to survive round trip, got %#v", parsed)
+	record, ok := Parse(Marshal(env)).Envelope.UsableEvidence()
+	if !ok || record.Provenance.SourceKind != SourceStaticCode || record.Provenance.PayloadTrust != ContentTrustUntrustedRepository {
+		t.Fatalf("expected static provenance to survive round trip, got %#v", record)
+	}
+	if record.Provenance.VersionAlignment != VersionMismatch || record.Provenance.SnapshotDigest != "digest-a" {
+		t.Fatalf("expected snapshot metadata to survive round trip, got %#v", record.Provenance)
 	}
 }
 
-func TestNewErrorCreatesFailedQuery(t *testing.T) {
+func TestNewErrorCreatesFailurePayload(t *testing.T) {
 	env := NewError(errors.New("prometheus request timed out"), "query timeout")
-	if env.Success || env.Status != StatusTimeout {
-		t.Fatalf("expected timeout envelope, got %#v", env)
+	if env.Status != StatusTimeout || env.Failure == nil {
+		t.Fatalf("expected timeout failure, got %#v", env)
 	}
-	if env.CanUseAsEvidence || env.EvidenceID != "" || !strings.HasPrefix(env.FailedQueryID, "fq_") {
-		t.Fatalf("expected failed query id only, got %#v", env)
-	}
-	if env.DataStatus != DataUnknown {
-		t.Fatalf("expected unknown data status, got %q", env.DataStatus)
+	if !strings.HasPrefix(env.Failure.QueryID, "fq_") || env.Evidence != nil {
+		t.Fatalf("expected failed query only, got %#v", env)
 	}
 }
 
-func TestParseLegacyFailureIsNotEvidence(t *testing.T) {
+func TestParseRejectsLegacyEnvelope(t *testing.T) {
 	parsed := Parse(`{"success":false,"error":"boom","message":"query failed"}`)
-	if parsed.Envelope.Status != StatusError {
-		t.Fatalf("expected error status, got %#v", parsed.Envelope)
+	if parsed.Envelope.Status != StatusProtocolError || parsed.Envelope.Failure == nil {
+		t.Fatalf("legacy envelope must become a protocol gap, got %#v", parsed.Envelope)
 	}
-	if parsed.Envelope.CanUseAsEvidence || parsed.Envelope.EvidenceID != "" {
-		t.Fatalf("legacy failure must not be evidence, got %#v", parsed.Envelope)
+	again := Parse(`{"success":false,"error":"boom","message":"query failed"}`)
+	if parsed.Envelope.Failure.QueryID != again.Envelope.Failure.QueryID {
+		t.Fatalf("persisted protocol gap id must be stable: %q != %q", parsed.Envelope.Failure.QueryID, again.Envelope.Failure.QueryID)
 	}
-	if !strings.HasPrefix(parsed.Envelope.FailedQueryID, "fq_") {
-		t.Fatalf("expected generated failed query id, got %#v", parsed.Envelope)
+}
+
+func TestParseRejectsUnknownV2Fields(t *testing.T) {
+	parsed := Parse(`{"protocol_version":"2","status":"success","data_status":"empty","success":true}`)
+	if parsed.Envelope.Status != StatusProtocolError {
+		t.Fatalf("unknown fields must be rejected instead of silently normalized: %#v", parsed.Envelope)
+	}
+}
+
+func TestValidateRejectsConflictingPayloads(t *testing.T) {
+	env := NewDataWithObservations("row", "ok", []Observation{{Kind: ObservationMetricValue}})
+	env.Failure = &FailureRecord{QueryID: "fq_bad", Code: "BAD"}
+	if err := env.Validate(); err == nil {
+		t.Fatal("expected mutually exclusive payload validation error")
 	}
 }

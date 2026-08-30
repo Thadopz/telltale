@@ -7,15 +7,32 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/gogf/gf/v2/frame/g"
 )
 
-// PrometheusAlert 告警信息结构
+const (
+	maxPrometheusMatchLabels = 8
+	maxPrometheusLabelRunes  = 128
+	maxPrometheusAlerts      = 50
+	maxAlertDescriptionRunes = 1024
+)
+
+var prometheusLabelPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+type QueryPrometheusAlertsInput struct {
+	MatchLabels map[string]string `json:"match_labels,omitempty" jsonschema:"description=Exact Prometheus label matches; all supplied labels must match"`
+	States      []string          `json:"states,omitempty" jsonschema:"description=Optional alert states to include: firing or pending"`
+}
+
 type PrometheusAlert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
@@ -24,7 +41,6 @@ type PrometheusAlert struct {
 	Value       string            `json:"value"`
 }
 
-// PrometheusAlertsResult 告警查询结果
 type PrometheusAlertsResult struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -34,134 +50,206 @@ type PrometheusAlertsResult struct {
 	ErrorType string `json:"errorType,omitempty"`
 }
 
-// SimplifiedAlert 简化的告警信息
 type SimplifiedAlert struct {
-	AlertName   string `json:"alert_name" jsonschema:"description=告警名称，从 Prometheus 告警的 labels.alertname 字段提取"`
-	Description string `json:"description" jsonschema:"description=告警描述信息，从 Prometheus 告警的 annotations.description 字段提取"`
-	State       string `json:"state" jsonschema:"description=告警状态，通常为 'firing'（触发中）或 'pending'（待触发）"`
-	ActiveAt    string `json:"active_at" jsonschema:"description=告警激活时间，RFC3339 格式的时间戳，例如 '2025-10-29T08:48:42.496134755Z'"`
-	Duration    string `json:"duration" jsonschema:"description=告警持续时间，从激活时间到当前时间的时长，格式如 '2h30m15s'、'30m15s' 或 '15s'"`
+	AlertName   string            `json:"alert_name" jsonschema:"description=Alert name from the Prometheus alertname label"`
+	Description string            `json:"description" jsonschema:"description=Alert description"`
+	State       string            `json:"state" jsonschema:"description=Prometheus alert state"`
+	ActiveAt    string            `json:"active_at" jsonschema:"description=RFC3339 alert activation time"`
+	Duration    string            `json:"duration" jsonschema:"description=How long the alert has been active"`
+	Labels      map[string]string `json:"labels,omitempty" jsonschema:"description=Bounded labels retained for service and environment correlation"`
 }
 
-// PrometheusAlertsOutput 告警查询输出
 type PrometheusAlertsOutput struct {
-	Success bool              `json:"success" jsonschema:"description=查询是否成功"`
-	Alerts  []SimplifiedAlert `json:"alerts,omitempty" jsonschema:"description=活动告警列表，每个告警包含名称、描述、状态、激活时间和持续时间。相同 alertname 的告警只保留第一个"`
-	Message string            `json:"message,omitempty" jsonschema:"description=操作结果的状态消息"`
-	Error   string            `json:"error,omitempty" jsonschema:"description=如果查询失败，包含错误信息"`
+	Success bool              `json:"success"`
+	Alerts  []SimplifiedAlert `json:"alerts"`
+	Message string            `json:"message,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }
 
-// queryPrometheusAlerts 查询Prometheus告警
+type prometheusAlertFilter struct {
+	matchLabels map[string]string
+	states      map[string]bool
+}
+
 func queryPrometheusAlerts(ctx context.Context) (PrometheusAlertsResult, error) {
-	baseURL := prometheusBaseURL(ctx)
-	apiURL := fmt.Sprintf("%s/api/v1/alerts", baseURL)
-
-	log.Printf("Querying Prometheus alerts: %s", apiURL)
-
-	// 创建HTTP客户端
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
 	var result PrometheusAlertsResult
-
-	// 发送请求
-	resp, err := client.Get(apiURL)
+	apiURL := fmt.Sprintf("%s/api/v1/alerts", prometheusBaseURL(ctx))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return result, fmt.Errorf("failed to query Prometheus alerts: %v", err)
+		return result, fmt.Errorf("build Prometheus alerts request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
 	if err != nil {
-		return result, fmt.Errorf("failed to read response: %v", err)
+		return result, fmt.Errorf("query Prometheus alerts: %w", err)
 	}
-
-	// 解析JSON响应
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return result, fmt.Errorf("Prometheus alerts returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024))
+	if err != nil {
+		return result, fmt.Errorf("read Prometheus alerts response: %w", err)
+	}
 	if err = json.Unmarshal(body, &result); err != nil {
-		return result, fmt.Errorf("failed to parse response: %v", err)
+		return result, fmt.Errorf("parse Prometheus alerts response: %w", err)
 	}
-
+	if result.Status != "success" {
+		return result, fmt.Errorf("Prometheus alerts query failed: %s", result.Error)
+	}
 	return result, nil
 }
 
-// calculateDuration 计算从 activeAt 到现在的持续时间
-func calculateDuration(activeAtStr string) string {
-	// 解析 RFC3339 格式的时间
-	activeAt, err := time.Parse(time.RFC3339Nano, activeAtStr)
+func calculateDuration(activeAtText string) string {
+	activeAt, err := time.Parse(time.RFC3339Nano, activeAtText)
 	if err != nil {
 		return "unknown"
 	}
-
-	// 计算持续时间
 	duration := time.Since(activeAt)
-
-	// 格式化持续时间
 	hours := int(duration.Hours())
 	minutes := int(duration.Minutes()) % 60
 	seconds := int(duration.Seconds()) % 60
-
 	if hours > 0 {
 		return fmt.Sprintf("%dh%dm%ds", hours, minutes, seconds)
-	} else if minutes > 0 {
-		return fmt.Sprintf("%dm%ds", minutes, seconds)
-	} else {
-		return fmt.Sprintf("%ds", seconds)
 	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm%ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }
 
-// NewPrometheusAlertsQueryTool 创建Prometheus告警查询工具
 func NewPrometheusAlertsQueryTool() (tool.InvokableTool, error) {
-	t, err := utils.InferOptionableTool(
+	return utils.InferOptionableTool(
 		"query_prometheus_alerts",
-		"Query active alerts from Prometheus alerting system. This tool retrieves all currently active/firing alerts including their labels, annotations, state, and values. Use this tool when you need to check what alerts are currently firing, investigate alert conditions, or monitor alert status.",
-		func(ctx context.Context, input *struct{}, opts ...tool.Option) (output string, err error) {
-			log.Printf("Querying Prometheus active alerts")
-
-			// 调用Prometheus Alerts API
+		"Query active alerts from Prometheus. Optional exact label and state filters can limit the result to one service.",
+		func(ctx context.Context, input *QueryPrometheusAlertsInput, opts ...tool.Option) (string, error) {
+			filter, err := normalizePrometheusAlertFilter(input)
+			if err != nil {
+				return marshalToolError(err, "invalid Prometheus alert filter"), nil
+			}
 			result, err := queryPrometheusAlerts(ctx)
 			if err != nil {
 				return marshalToolError(err, "failed to query Prometheus alerts"), nil
 			}
-
-			// 转换为简化格式，对于相同的 alertname，只保留第一个
-			seenAlertNames := make(map[string]bool)
-			simplifiedAlerts := make([]SimplifiedAlert, 0)
-			for _, alert := range result.Data.Alerts {
-				alertName := alert.Labels["alertname"]
-
-				// 如果这个 alertname 已经存在，跳过
-				if seenAlertNames[alertName] {
-					continue
-				}
-
-				// 标记为已见过
-				seenAlertNames[alertName] = true
-
-				simplified := SimplifiedAlert{
-					AlertName:   alertName,
-					Description: alert.Annotations["description"],
-					State:       alert.State,
-					ActiveAt:    alert.ActiveAt,
-					Duration:    calculateDuration(alert.ActiveAt),
-				}
-				simplifiedAlerts = append(simplifiedAlerts, simplified)
-			}
-
-			// 构建成功响应
-			alertsOut := PrometheusAlertsOutput{
+			alerts := simplifyPrometheusAlerts(result.Data.Alerts, filter)
+			log.Printf("Prometheus alerts query completed: %d alerts found", len(alerts))
+			output := PrometheusAlertsOutput{
 				Success: true,
-				Alerts:  simplifiedAlerts,
-				Message: fmt.Sprintf("Successfully retrieved %d active alerts", len(simplifiedAlerts)),
+				Alerts:  alerts,
+				Message: fmt.Sprintf("Successfully retrieved %d active alerts", len(alerts)),
 			}
-
-			log.Printf("Prometheus alerts query completed: %d alerts found", len(simplifiedAlerts))
-			return marshalToolData(alertsOut, fmt.Sprintf("retrieved %d active Prometheus alerts", len(simplifiedAlerts))), nil
+			return marshalToolData(output, fmt.Sprintf("retrieved %d active Prometheus alerts", len(alerts))), nil
 		})
-	if err != nil {
-		log.Fatal(err)
+}
+
+func simplifyPrometheusAlerts(alerts []PrometheusAlert, filter prometheusAlertFilter) []SimplifiedAlert {
+	seenAlertNames := make(map[string]bool)
+	result := make([]SimplifiedAlert, 0, len(alerts))
+	for _, alert := range alerts {
+		if !prometheusAlertMatches(alert, filter) {
+			continue
+		}
+		alertName := alert.Labels["alertname"]
+		if seenAlertNames[alertName] {
+			continue
+		}
+		seenAlertNames[alertName] = true
+		result = append(result, SimplifiedAlert{
+			AlertName:   boundedText(alertName, maxPrometheusLabelRunes),
+			Description: boundedText(alert.Annotations["description"], maxAlertDescriptionRunes),
+			State:       alert.State,
+			ActiveAt:    alert.ActiveAt,
+			Duration:    calculateDuration(alert.ActiveAt),
+			Labels:      boundedPrometheusLabels(alert.Labels),
+		})
+		if len(result) >= maxPrometheusAlerts {
+			break
+		}
 	}
-	return t, err
+	return result
+}
+
+func normalizePrometheusAlertFilter(input *QueryPrometheusAlertsInput) (prometheusAlertFilter, error) {
+	filter := prometheusAlertFilter{matchLabels: map[string]string{}, states: map[string]bool{}}
+	if input == nil {
+		return filter, nil
+	}
+	if len(input.MatchLabels) > maxPrometheusMatchLabels {
+		return filter, fmt.Errorf("match_labels exceeds %d entries", maxPrometheusMatchLabels)
+	}
+	for rawKey, rawValue := range input.MatchLabels {
+		key := strings.TrimSpace(rawKey)
+		value := strings.TrimSpace(rawValue)
+		if !prometheusLabelPattern.MatchString(key) {
+			return filter, fmt.Errorf("invalid Prometheus label name %q", key)
+		}
+		if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > maxPrometheusLabelRunes || hasControlCharacter(value) {
+			return filter, fmt.Errorf("invalid value for Prometheus label %q", key)
+		}
+		filter.matchLabels[key] = value
+	}
+	for _, rawState := range input.States {
+		state := strings.ToLower(strings.TrimSpace(rawState))
+		if state != "firing" && state != "pending" {
+			return filter, fmt.Errorf("unsupported Prometheus alert state %q", rawState)
+		}
+		filter.states[state] = true
+	}
+	return filter, nil
+}
+
+func prometheusAlertMatches(alert PrometheusAlert, filter prometheusAlertFilter) bool {
+	for key, expected := range filter.matchLabels {
+		if alert.Labels[key] != expected {
+			return false
+		}
+	}
+	state := strings.ToLower(strings.TrimSpace(alert.State))
+	return len(filter.states) == 0 || filter.states[state]
+}
+
+func boundedPrometheusLabels(labels map[string]string) map[string]string {
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > maxPrometheusMatchLabels {
+		keys = keys[:maxPrometheusMatchLabels]
+	}
+	bounded := make(map[string]string, len(keys))
+	for _, key := range keys {
+		bounded[key] = boundedLabelValue(labels[key])
+	}
+	return bounded
+}
+
+func boundedLabelValue(value string) string {
+	return boundedText(value, maxPrometheusLabelRunes)
+}
+
+func boundedText(value string, maxRunes int) string {
+	var builder strings.Builder
+	runeCount := 0
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			continue
+		}
+		if runeCount >= maxRunes {
+			break
+		}
+		builder.WriteRune(character)
+		runeCount++
+	}
+	return builder.String()
+}
+
+func hasControlCharacter(value string) bool {
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return true
+		}
+	}
+	return false
 }
 
 func prometheusBaseURL(ctx context.Context) string {

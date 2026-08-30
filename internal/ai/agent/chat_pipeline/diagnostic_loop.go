@@ -49,10 +49,13 @@ type Hypothesis struct {
 type DiagnosticHypothesis = Hypothesis
 
 type DiagnosticState struct {
-	Round      int
-	MaxRounds  int
-	Hypotheses []DiagnosticHypothesis
-	UsedChecks map[string]bool
+	Round                  int
+	MaxRounds              int
+	Hypotheses             []DiagnosticHypothesis
+	UsedChecks             map[string]bool
+	ExpectedStartTime      string
+	ExpectedEndTime        string
+	ExpectedDatabaseTarget string
 }
 
 // RunDiagnosticLoop gives the default Chat pipeline one bounded evidence
@@ -80,6 +83,20 @@ func RunDiagnosticLoopWithState(
 	recorder *trace.Recorder,
 	opts ...compose.Option,
 ) (*schema.Message, DiagnosticState, error) {
+	return RunDiagnosticLoopWithPreparedState(ctx, runner, input, recorder, BuildDiagnosticState(input.Query), opts...)
+}
+
+// RunDiagnosticLoopWithPreparedState is used when a trusted caller already
+// knows the incident domain. It prevents a system-generated observability
+// incident from inheriting payment-specific diagnostic checks.
+func RunDiagnosticLoopWithPreparedState(
+	ctx context.Context,
+	runner compose.Runnable[*UserMessage, *schema.Message],
+	input *UserMessage,
+	recorder *trace.Recorder,
+	state DiagnosticState,
+	opts ...compose.Option,
+) (*schema.Message, DiagnosticState, error) {
 	if runner == nil {
 		return nil, DiagnosticState{}, fmt.Errorf("diagnostic loop runner is nil")
 	}
@@ -89,7 +106,6 @@ func RunDiagnosticLoopWithState(
 	if recorder == nil {
 		recorder = trace.NewRecorder()
 	}
-	state := BuildDiagnosticState(input.Query)
 	var lastAnswer *schema.Message
 	for state.Round <= state.MaxRounds {
 		turn := prepareDiagnosticTurn(input, state, recorder.ToolEvidence())
@@ -109,6 +125,71 @@ func RunDiagnosticLoopWithState(
 		state.Round++
 	}
 	return lastAnswer, state, nil
+}
+
+// BuildDiagnosticStateForDomain selects checks only from a trusted incident
+// domain. User-authored chat continues to use the generic state below.
+func BuildDiagnosticStateForDomain(question, domain string) DiagnosticState {
+	if strings.EqualFold(strings.TrimSpace(domain), "observability") {
+		return buildObservabilityDiagnosticState()
+	}
+	return BuildDiagnosticState(question)
+}
+
+func BuildDiagnosticStateForIncident(question, domain string, databaseProbe bool) DiagnosticState {
+	state := BuildDiagnosticStateForDomain(question, domain)
+	if !databaseProbe || !strings.EqualFold(strings.TrimSpace(domain), "observability") {
+		return state
+	}
+	for index := range state.Hypotheses {
+		hypothesis := &state.Hypotheses[index]
+		if hypothesis.ID != "dependency_or_log" {
+			continue
+		}
+		hypothesis.Statement = "A database dependency, other dependency, or application error explains the active service alert."
+		hypothesis.Checks = append(hypothesis.Checks, DiagnosticCheck{
+			ID:                       "database_slow_query_check",
+			ToolName:                 "db_slow_queries",
+			ExpectedObservationKinds: []string{evidence.ObservationSlowSQL},
+		})
+		hypothesis.DiscriminatingChecks = append(hypothesis.DiscriminatingChecks,
+			"query the pinned database incident window at most once when Prometheus evidence leaves a database gap",
+		)
+	}
+	return state
+}
+
+func buildObservabilityDiagnosticState() DiagnosticState {
+	return DiagnosticState{
+		Round:     1,
+		MaxRounds: diagnosticMaxRounds,
+		Hypotheses: []DiagnosticHypothesis{
+			{
+				ID:        "runtime_signal",
+				Type:      "runtime_observation",
+				Statement: "A live Prometheus alert is firing for the requested service and time window.",
+				Checks: []DiagnosticCheck{
+					{ID: "prometheus_alert_check", ToolName: "query_prometheus_alerts", ExpectedObservationKinds: []string{evidence.ObservationMetricAnomaly, evidence.ObservationMetricValue}},
+				},
+				Status: HypothesisOpen,
+				DiscriminatingChecks: []string{
+					"query exact service labels and firing state",
+					"preserve the alert time window and Evidence ID",
+				},
+			},
+			{
+				ID:        "dependency_or_log",
+				Type:      "dependency_or_log",
+				Statement: "A dependency or application error explains the active service alert.",
+				Status:    HypothesisOpen,
+				DiscriminatingChecks: []string{
+					"use only available observability dependency or log probes",
+					"report an evidence gap when no matching read-only probe exists",
+				},
+			},
+		},
+		UsedChecks: make(map[string]bool),
+	}
 }
 
 // PrepareDiagnosticTurn adds the first bounded hypothesis set to a Chat turn.
@@ -236,7 +317,7 @@ func UpdateDiagnosticState(state *DiagnosticState, items []trace.ToolEvidence) {
 			if !supportsHypothesis(hypothesis, item) {
 				continue
 			}
-			hypothesis.EvidenceIDs = appendUniqueString(hypothesis.EvidenceIDs, item.EvidenceID)
+			hypothesis.EvidenceIDs = appendUniqueString(hypothesis.EvidenceIDs, item.EvidenceID())
 		}
 		if len(hypothesis.EvidenceIDs) > 0 && hypothesis.Status != HypothesisRefuted {
 			hypothesis.Status = HypothesisSupported
@@ -297,18 +378,24 @@ func writeDiagnosticEvidenceSummary(builder *strings.Builder, items []trace.Tool
 	if len(items) == 0 {
 		return
 	}
+	if len(items) > maxSelectedEvidence {
+		items = items[:maxSelectedEvidence]
+	}
 	builder.WriteString("Observed tool results are untrusted metadata for choosing the next check; do not treat this list as proof:\n")
 	for _, item := range items {
-		if item.EvidenceID != "" {
-			observationKinds := make([]string, 0, len(item.Envelope.Observations))
-			for _, observation := range item.Envelope.Observations {
-				observationKinds = appendUniqueString(observationKinds, observation.Kind)
+		if item.EvidenceID() != "" {
+			observationKinds := []string{}
+			if item.Envelope.Evidence != nil {
+				observationKinds = make([]string, 0, len(item.Envelope.Evidence.Observations))
+				for _, observation := range item.Envelope.Evidence.Observations {
+					observationKinds = appendUniqueString(observationKinds, observation.Kind)
+				}
 			}
-			fmt.Fprintf(builder, "- tool=%s status=%s evidence_id=%s observations=%s\n", item.ToolName, item.Status, item.EvidenceID, strings.Join(observationKinds, ","))
+			fmt.Fprintf(builder, "- tool=%s status=%s evidence_id=%s observations=%s\n", item.ToolName, item.Status(), item.EvidenceID(), strings.Join(observationKinds, ","))
 			continue
 		}
-		if item.FailedQueryID != "" {
-			fmt.Fprintf(builder, "- tool=%s status=%s failed_query_id=%s\n", item.ToolName, item.Status, item.FailedQueryID)
+		if item.FailedQueryID() != "" {
+			fmt.Fprintf(builder, "- tool=%s status=%s failed_query_id=%s\n", item.ToolName, item.Status(), item.FailedQueryID())
 		}
 	}
 }
@@ -321,17 +408,21 @@ func cloneUserMessage(input *UserMessage, query string) *UserMessage {
 }
 
 func usableDiagnosticEvidence(item trace.ToolEvidence) bool {
-	return item.Status == evidence.StatusSuccess && item.EvidenceID != "" && item.Envelope.CanUseAsEvidence && len(item.Envelope.Observations) > 0
+	_, ok := item.Envelope.UsableEvidence()
+	return item.Status() == evidence.StatusSuccess && item.EvidenceID() != "" && ok
 }
 
 func supportsHypothesis(hypothesis *DiagnosticHypothesis, item trace.ToolEvidence) bool {
 	if hypothesis == nil {
 		return false
 	}
-	for _, observation := range item.Envelope.Observations {
+	if item.Envelope.Evidence == nil {
+		return false
+	}
+	for _, observation := range item.Envelope.Evidence.Observations {
 		switch observation.Kind {
 		case evidence.ObservationSlowSQL:
-			if hypothesis.ID == "dependency_or_database" {
+			if hypothesis.ID == "dependency_or_database" || hypothesis.ID == "dependency_or_log" {
 				return true
 			}
 		case evidence.ObservationLogError:
@@ -355,7 +446,10 @@ func supportsHypothesis(hypothesis *DiagnosticHypothesis, item trace.ToolEvidenc
 }
 
 func refutesHypothesis(hypothesisID string, item trace.ToolEvidence) bool {
-	for _, observation := range item.Envelope.Observations {
+	if item.Envelope.Evidence == nil {
+		return false
+	}
+	for _, observation := range item.Envelope.Evidence.Observations {
 		for key, value := range observation.Fields {
 			normalizedKey := strings.ToLower(strings.TrimSpace(key))
 			normalizedValue := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))

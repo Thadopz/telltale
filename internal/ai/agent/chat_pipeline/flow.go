@@ -66,11 +66,11 @@ func newADKAgentLambdaWithOptions(ctx context.Context, opts ChatAgentOptions) (*
 			modelRetries = 0
 		}
 	}
-	invokeAgent, invokeOverhead, err := newChatAgentGraph(agentContext, chatModel, failoverModel, opts.Tools, maxIterations, modelRetries, opts.DisableToolSearch, opts.AgentScope)
+	invokeAgent, invokeOverhead, err := newChatAgentGraph(agentContext, chatModel, failoverModel, opts.Tools, maxIterations, modelRetries, opts.DisableToolSearch, opts.AgentScope, opts.AllowedDomains, opts.AllowedToolNames, opts.EvalEvidenceMode)
 	if err != nil {
 		return nil, 0, err
 	}
-	streamAgent, streamOverhead, err := newChatAgentGraph(agentContext, chatModel, failoverModel, opts.Tools, maxIterations, 0, opts.DisableToolSearch, opts.AgentScope)
+	streamAgent, streamOverhead, err := newChatAgentGraph(agentContext, chatModel, failoverModel, opts.Tools, maxIterations, 0, opts.DisableToolSearch, opts.AgentScope, opts.AllowedDomains, opts.AllowedToolNames, opts.EvalEvidenceMode)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -113,6 +113,8 @@ const databaseAgentInstruction = `You are the database specialist.
 - Prefer read-only inspection and preserve database, table, SQL digest, trace, and request identifiers exactly.
 - Use only the fixed read-only tools db_server_health, db_active_queries, db_wait_events, db_locks, and db_slow_queries. Never submit SQL, a DSN, a host, a username, or a password.
 - Start with the smallest query that tests the current hypothesis. Use db_server_health for server counters, db_active_queries for live work, db_wait_events for aggregated waits, db_locks for lock contention, and db_slow_queries for bounded top query records.
+- Only db_slow_queries has historical time semantics. When no time is specified it uses the target database clock and the configured default window (30 minutes by default). Never attach historical time parameters to server health, active queries, waits, or locks because those are current snapshots.
+- Slow-query ranges are half-open [start_time,end_time) and cannot exceed the configured maximum (24 hours at most). Do not widen a rejected, partial, or unavailable range automatically.
 - Use generic sort modes such as latency, frequency, resource, or recent. The configured database adapter chooses the concrete observation source.
 - If the configured database engine does not support a capability, preserve the capability_not_supported result as an evidence gap. Never assume the database is MySQL or try another engine automatically.
 - Results may be partial because of row or byte limits. Preserve returned_rows, max_rows, returned_bytes, max_bytes, projection, sort_by, and truncation metadata. A partial result describes only the returned scope and cannot prove that all database records are healthy.
@@ -169,7 +171,7 @@ var domainDefinitions = map[tools.Domain]agentDefinition{
 	},
 }
 
-func newChatAgentGraph(ctx context.Context, chatModel model.ToolCallingChatModel, failoverModel model.ToolCallingChatModel, customTools []tool.BaseTool, maxIterations int, modelRetries int, disableToolSearch bool, agentScope authz.AgentScope) (*adk.ChatModelAgent, int, error) {
+func newChatAgentGraph(ctx context.Context, chatModel model.ToolCallingChatModel, failoverModel model.ToolCallingChatModel, customTools []tool.BaseTool, maxIterations int, modelRetries int, disableToolSearch bool, agentScope authz.AgentScope, allowedDomains []tools.Domain, allowedToolNames map[tools.Domain][]string, evalEvidenceMode string) (*adk.ChatModelAgent, int, error) {
 	if customTools != nil {
 		definition := coordinatorDefinition
 		visibleTools := customTools
@@ -179,6 +181,7 @@ func newChatAgentGraph(ctx context.Context, chatModel model.ToolCallingChatModel
 			definition = scopedDefinition
 			visibleTools = tools.FilterToolsForAgent(ctx, customTools, agentScope)
 		}
+		definition = evalEvidenceDefinition(definition, evalEvidenceMode)
 		agent, err := newConfiguredADKChatAgentWithOptions(ctx, definition, chatModel, failoverModel, visibleTools, maxIterations, modelRetries, disableToolSearch)
 		if err != nil {
 			return nil, 0, err
@@ -186,7 +189,7 @@ func newChatAgentGraph(ctx context.Context, chatModel model.ToolCallingChatModel
 		return agent, estimateAgentPromptOverhead(ctx, definition, visibleTools), nil
 	}
 	registry := tools.NewRegistry()
-	coordinatorTools, promptOverhead, err := buildCoordinatorToolsFromRegistry(ctx, registry, chatModel, failoverModel, maxIterations, modelRetries)
+	coordinatorTools, promptOverhead, err := buildCoordinatorToolsFromRegistry(ctx, registry, chatModel, failoverModel, maxIterations, modelRetries, allowedDomains, allowedToolNames)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -195,6 +198,18 @@ func newChatAgentGraph(ctx context.Context, chatModel model.ToolCallingChatModel
 		return nil, 0, err
 	}
 	return agent, maxInt(promptOverhead, estimateAgentPromptOverhead(ctx, coordinatorDefinition, coordinatorTools)), nil
+}
+
+func evalEvidenceDefinition(definition agentDefinition, mode string) agentDefinition {
+	if strings.TrimSpace(mode) != "raw_unenforced" {
+		return definition
+	}
+	copyDefinition := definition
+	if strings.TrimSpace(copyDefinition.instruction) != "" {
+		copyDefinition.instruction += "\n"
+	}
+	copyDefinition.instruction += `This evaluation exposes ordinary read-only tool results containing status, data, and summary only. Base the diagnosis on those returned business fields. Do not require or invent Evidence IDs, trust metadata, observations, scope metadata, or coverage status.`
+	return copyDefinition
 }
 
 func agentScopeToDomain(scope authz.AgentScope) string {
@@ -231,7 +246,7 @@ func coordinatorVisibleTools(ctx context.Context, candidates []tool.BaseTool) []
 	return visible
 }
 
-func buildCoordinatorToolsFromRegistry(ctx context.Context, registry *tools.Registry, chatModel model.ToolCallingChatModel, failoverModel model.ToolCallingChatModel, maxIterations int, modelRetries int) ([]tool.BaseTool, int, error) {
+func buildCoordinatorToolsFromRegistry(ctx context.Context, registry *tools.Registry, chatModel model.ToolCallingChatModel, failoverModel model.ToolCallingChatModel, maxIterations int, modelRetries int, allowedDomains []tools.Domain, allowedToolNames map[tools.Domain][]string) ([]tool.BaseTool, int, error) {
 	coordinatorTools, err := registry.ToolsForAgent(ctx, tools.ScenarioChat, authz.AgentScopeCoordinator)
 	if err != nil {
 		return nil, 0, err
@@ -239,6 +254,9 @@ func buildCoordinatorToolsFromRegistry(ctx context.Context, registry *tools.Regi
 	promptOverhead := 0
 
 	for _, domain := range []tools.Domain{tools.DomainObservability, tools.DomainDatabase, tools.DomainPayment, tools.DomainKnowledge} {
+		if !domainIsAllowed(domain, allowedDomains) {
+			continue
+		}
 		definition, ok := domainDefinitions[domain]
 		if !ok {
 			return nil, 0, fmt.Errorf("missing agent definition for tool domain %q", domain)
@@ -247,6 +265,7 @@ func buildCoordinatorToolsFromRegistry(ctx context.Context, registry *tools.Regi
 		if err != nil {
 			return nil, 0, fmt.Errorf("load tools for %s: %w", definition.name, err)
 		}
+		domainTools = filterToolsByName(ctx, domainTools, allowedToolNames[domain])
 		if len(domainTools) == 0 {
 			continue
 		}
@@ -262,6 +281,36 @@ func buildCoordinatorToolsFromRegistry(ctx context.Context, registry *tools.Regi
 		coordinatorTools = append(coordinatorTools, agentTool)
 	}
 	return coordinatorTools, promptOverhead, nil
+}
+
+func domainIsAllowed(domain tools.Domain, allowed []tools.Domain) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, candidate := range allowed {
+		if candidate == domain {
+			return true
+		}
+	}
+	return false
+}
+
+func filterToolsByName(ctx context.Context, candidates []tool.BaseTool, allowed []string) []tool.BaseTool {
+	if len(allowed) == 0 {
+		return candidates
+	}
+	wanted := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		wanted[strings.TrimSpace(name)] = true
+	}
+	filtered := make([]tool.BaseTool, 0, len(candidates))
+	for _, candidate := range candidates {
+		info, err := candidate.Info(ctx)
+		if err == nil && info != nil && wanted[info.Name] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 func estimateAgentPromptOverhead(ctx context.Context, definition agentDefinition, toolList []tool.BaseTool) int {

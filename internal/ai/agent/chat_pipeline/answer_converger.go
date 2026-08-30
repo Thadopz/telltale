@@ -23,6 +23,9 @@ type AnswerConvergeInput struct {
 	Localizer      AnswerLocalizer
 	Recorder       *trace.Recorder
 	PipelineResult *ClaimPipelineResult
+	// AllowExtractionFallback is reserved for trusted system-generated
+	// incidents. Interactive diagnosis keeps strict extraction failures.
+	AllowExtractionFallback bool
 
 	// Finalize is retained for source compatibility with older callers. It is
 	// intentionally not used for evidence coverage anymore.
@@ -50,8 +53,7 @@ func ConvergeAnswer(ctx context.Context, input AnswerConvergeInput) (string, err
 	draftAnswer := strings.TrimSpace(input.Answer)
 	mode := normalizeResponseMode(input.Mode)
 	collection := collectEvidence(input.Steps, input.ToolEvidence)
-	evidenceItems := collection.Items
-	failedQueries := collection.FailedQueries
+	evidenceItems, failedQueries := selectModelEvidence(collection.Items, collection.FailedQueries, input.DiagnosticState, collection.Conflicts)
 	if input.PipelineResult != nil {
 		input.PipelineResult.EvidenceConflicts = append([]evidence.EvidenceConflict(nil), collection.Conflicts...)
 		input.PipelineResult.ProtocolIssues = append([]evidence.EvidenceProtocolIssue(nil), collection.ProtocolIssues...)
@@ -97,6 +99,9 @@ func ConvergeAnswer(ctx context.Context, input AnswerConvergeInput) (string, err
 	if err != nil {
 		setClaimPipelineError(input.PipelineResult, err)
 		recordClaimPipelineFailure(input.Recorder, err)
+		if input.AllowExtractionFallback {
+			return safeExtractionFallback(draftAnswer, evidenceItems, failedQueries, input.PipelineResult), nil
+		}
 		return "", err
 	}
 	claimSet = evidence.NormalizeClaimSet(claimSet)
@@ -150,6 +155,22 @@ func ConvergeAnswer(ctx context.Context, input AnswerConvergeInput) (string, err
 		input.PipelineResult.LocalizationMode = localizationMode
 	}
 	return strings.TrimSpace(answer), nil
+}
+
+func safeExtractionFallback(draftAnswer string, evidenceItems []evidence.EvidenceItem, failedQueries []evidence.FailedQuery, result *ClaimPipelineResult) string {
+	if result != nil {
+		result.LocalizationMode = "validated_draft_fallback"
+	}
+	available := evidenceSetFromEvidenceItems(evidenceItems, failedQueries)
+	if draft := strings.TrimSpace(draftAnswer); draft != "" {
+		if validation := evidence.ValidateAnswer(draft, available); validation.OK {
+			return draft
+		}
+	}
+	if result != nil {
+		result.LocalizationMode = "extraction_gap"
+	}
+	return noStructuredClaimAnswer()
 }
 
 func setClaimPipelineError(result *ClaimPipelineResult, err error) {

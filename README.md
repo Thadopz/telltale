@@ -24,8 +24,11 @@ go run .
 ```bash
 telltale diagnose "支付回调最近大量失败，请分析影响范围和可能原因"
 telltale diagnose --json "数据库连接池耗尽"
-telltale sql slow-sql --limit 20 --format json
+telltale sql slow-sql --last 30m --limit 20 --format json
+telltale sql slow-sql --since 2026-08-11T01:00:00Z --until 2026-08-11T01:30:00Z
 telltale watch --once
+telltale incident list --status firing --service card-service
+telltale incident show inc_xxx --json
 telltale knowledge recall --query "支付回调超时"
 ```
 
@@ -44,7 +47,9 @@ go run ./internal/ai/cmd/knowledge_cmd index
 
 ## 按需启用的集成
 
-支付观测、Prometheus、外部数据库诊断和通用 MCP 工具仍可作为显式配置的外部能力使用；默认不会主动连接这些服务。数据库 Agent 只使用通用 `db_*` 工具，由 `database.targets` 选择实际适配器；当前仅实现 MySQL 适配器，未支持的数据库会返回能力缺口，不会伪造结果。
+支付观测、Prometheus、外部数据库诊断和通用 MCP 工具仍可作为显式配置的外部能力使用；默认不会主动连接这些服务。设置 `watch.enabled=true`、`watch.diagnosis.enabled=true`，并在具体规则上设置 `auto_diagnose: true` 后，watcher 会在事故打开时创建可恢复的 SQLite 诊断任务；该能力只读且不会自动修复。数据库 Agent 只使用通用 `db_*` 工具，由 `database.targets` 选择实际适配器。MySQL 时间窗口查询严格读取 `mysql.slow_log`；PostgreSQL 由 `telltale watch` 定时采样 `pg_stat_statements` 增量。两种历史能力均须显式配置，来源缺失时会返回证据缺口，不会把累计快照伪装成窗口数据。
+
+`db_slow_queries` 未指定时间时，以目标数据库的 `CURRENT_TIMESTAMP` 为终点查询最近 30 分钟；最大跨度为 24 小时。CLI 的 `--window` 是 `--last` 的兼容别名。`server-health`、`active-queries`、`wait-events` 和 `locks` 仍是当前快照，不接受历史时间参数。watcher 规则只有同时启用 `database_probe.enabled` 并配置逻辑 target 时，才会为 observability 事故增加一次受控慢 SQL 查询；target 与事故窗口由运行时锁定。
 
 ## 验证
 

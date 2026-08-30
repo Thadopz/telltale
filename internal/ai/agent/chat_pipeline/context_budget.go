@@ -26,11 +26,11 @@ const (
 )
 
 const (
-	historyShare      = 0.30
-	summaryShare      = 0.15
-	sessionShare      = 0.08
-	durableShare      = 0.10
-	toolResultsShare  = 0.20
+	historyShare      = 0.27
+	summaryShare      = 0.13
+	sessionShare      = 0.06
+	durableShare      = 0.20
+	toolResultsShare  = 0.17
 	projectShare      = 0.10
 	skillsShare       = 0.07
 	minimumLayerToken = 256
@@ -332,6 +332,7 @@ func estimateModelContextTokens(modelContext ModelContext) int {
 	total += mem.EstimateTextTokens(modelContext.ToolResults)
 	total += mem.EstimateTextTokens(modelContext.ProjectContext)
 	total += mem.EstimateTextTokens(modelContext.RequestAnalysis)
+	total += mem.EstimateTextTokens(modelContext.CurrentTime)
 	total += mem.EstimateTextTokens(modelContext.Skills)
 	for _, message := range modelContext.History {
 		total += mem.EstimateMessageTokens(message)

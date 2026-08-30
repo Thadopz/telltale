@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -109,14 +111,56 @@ func WriteReports(results []EvalCaseResult, opts RunOptions) (RunResult, error) 
 		return RunResult{}, err
 	}
 	summary := Summarize(opts.Mode, results)
+	if opts.Mode == ModeEvidenceAblation {
+		ablation := SummarizeAblation(results, opts.BootstrapSamples, opts.RandomSeed)
+		if strings.TrimSpace(opts.HumanReviewPath) != "" {
+			reviews, err := LoadHumanReviews(opts.HumanReviewPath)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("load human reviews: %w", err)
+			}
+			agreement := CalculateReviewerAgreement(results, reviews)
+			ablation.ReviewerAgreement = &agreement
+		}
+		summary.Ablation = &ablation
+	}
 	applyQualityGate(&summary, opts.MinimumPassRate)
 	if err := os.WriteFile(mdPath, []byte(markdownReport(summary, results)), 0644); err != nil {
 		return RunResult{}, err
 	}
-	return RunResult{Summary: summary, Results: results, JSONLPath: jsonlPath, MarkdownPath: mdPath}, nil
+	blindReviewPath := ""
+	if opts.Mode == ModeEvidenceAblation {
+		blindReviewPath = filepath.Join(opts.ReportsDir, "eval-"+opts.RunID+"-blind-review.jsonl")
+		reviewFraction := 0.10
+		if summary.Ablation != nil && summary.Ablation.ReviewerAgreement != nil {
+			reviewFraction = summary.Ablation.ReviewerAgreement.RecommendedReviewFraction
+		}
+		if err := writeBlindReviewPack(blindReviewPath, results, opts.RandomSeed, reviewFraction); err != nil {
+			return RunResult{}, err
+		}
+	}
+	return RunResult{Summary: summary, Results: results, JSONLPath: jsonlPath, MarkdownPath: mdPath, BlindReviewPath: blindReviewPath}, nil
 }
 
 func applyQualityGate(summary *RunSummary, minimumPassRate float64) {
+	if summary.Mode == ModeEvidenceAblation {
+		summary.RequiredPassRate = 0
+		summary.SafetyGatePass = true
+		summary.VariantGatePass = summary.Ablation != nil && len(summary.Ablation.Groups) == len(EvidenceModes())
+		if summary.Ablation != nil {
+			for _, group := range summary.Ablation.Groups {
+				if group.Runs == 0 {
+					summary.VariantGatePass = false
+				}
+			}
+			for _, comparison := range summary.Ablation.Comparisons {
+				if comparison.Pairs == 0 {
+					summary.VariantGatePass = false
+				}
+			}
+		}
+		summary.GatePass = summary.VariantGatePass
+		return
+	}
 	summary.RequiredPassRate = minimumPassRate
 	if summary.RequiredPassRate <= 0 {
 		summary.RequiredPassRate = DefaultMinimumPassRate(summary.Mode)
@@ -132,6 +176,55 @@ func applyQualityGate(summary *RunSummary, minimumPassRate float64) {
 		}
 	}
 	summary.GatePass = summary.PassRate >= summary.RequiredPassRate && summary.SafetyGatePass && summary.VariantGatePass
+}
+
+type blindReviewEntry struct {
+	ReviewID               string `json:"review_id"`
+	CaseID                 string `json:"case_id"`
+	Attempt                int    `json:"attempt"`
+	Query                  string `json:"query"`
+	Answer                 string `json:"answer"`
+	RecommendedHumanReview bool   `json:"recommended_human_review"`
+}
+
+func writeBlindReviewPack(path string, results []EvalCaseResult, seed int64, reviewFraction float64) error {
+	entries := make([]blindReviewEntry, 0, len(results))
+	for _, result := range results {
+		if result.EvidenceMode == "" {
+			continue
+		}
+		entries = append(entries, blindReviewEntry{
+			ReviewID: result.ReviewID,
+			CaseID:   result.ID,
+			Attempt:  result.Attempt,
+			Query:    result.Query,
+			Answer:   BlindEvaluationText(result.Answer),
+		})
+	}
+	// A fixed shuffle prevents the original balanced arm order from revealing
+	// the hidden group while keeping review packs reproducible.
+	if seed == 0 {
+		seed = 1
+	}
+	random := rand.New(rand.NewSource(seed))
+	random.Shuffle(len(entries), func(i int, j int) { entries[i], entries[j] = entries[j], entries[i] })
+	reviewCount := int(math.Ceil(float64(len(entries)) * reviewFraction))
+	for index := 0; index < reviewCount && index < len(entries); index++ {
+		entries[index].RecommendedHumanReview = true
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	encoder := json.NewEncoder(writer)
+	for _, entry := range entries {
+		if err := encoder.Encode(entry); err != nil {
+			return err
+		}
+	}
+	return writer.Flush()
 }
 
 func writeJSONL(path string, results []EvalCaseResult) error {
@@ -179,6 +272,57 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 		summary.AverageAnswerScore,
 		summary.AverageSafetyScore,
 	)
+	if summary.Ablation != nil {
+		fmt.Fprintf(&b, "## Evidence Ablation\n\n")
+		fmt.Fprintf(&b, "- Bootstrap samples: %d\n", summary.Ablation.BootstrapSamples)
+		fmt.Fprintf(&b, "- Conclusion: `%s`\n\n", summary.Ablation.Conclusion)
+		if agreement := summary.Ablation.ReviewerAgreement; agreement != nil {
+			fmt.Fprintf(&b, "- Human/Judge agreement: reviewed=%d/%d kappa=%.3f reliable=%v recommended_review=%.0f%%\n\n",
+				agreement.Reviewed, agreement.Eligible, agreement.CohensKappa,
+				agreement.Reliable, agreement.RecommendedReviewFraction*100)
+		}
+		fmt.Fprintf(&b, "| Mode | Runs | Accuracy (95%% CI) | Fact F1 | Hallucination | Completion | Tokens | Latency |\n")
+		fmt.Fprintf(&b, "|---|---:|---:|---:|---:|---:|---:|---:|\n")
+		for _, group := range summary.Ablation.Groups {
+			fmt.Fprintf(&b, "| `%s` | %d | %.2f%% [%.2f%%, %.2f%%] | %.3f | %.2f%% | %.2f%% | %.1f | %.1fms |\n",
+				group.Mode, group.Runs, group.Accuracy*100, group.AccuracyCILow*100, group.AccuracyCIHigh*100,
+				group.MeanFactF1, group.CriticalHallucinationRate*100, group.CompletionRate*100,
+				group.AverageTokens, group.AverageLatencyMS)
+		}
+		fmt.Fprintf(&b, "\n| Comparison | Pairs | Accuracy delta (95%% CI) | McNemar p | Holm p | Significant |\n")
+		fmt.Fprintf(&b, "|---|---:|---:|---:|---:|---:|\n")
+		for _, comparison := range summary.Ablation.Comparisons {
+			fmt.Fprintf(&b, "| `%s - %s` | %d | %.2f%% [%.2f%%, %.2f%%] | %.4f | %.4f | %v |\n",
+				comparison.Left, comparison.Right, comparison.Pairs, comparison.AccuracyDelta*100,
+				comparison.CILow*100, comparison.CIHigh*100, comparison.McNemarP,
+				comparison.HolmAdjustedP, comparison.Significant)
+		}
+		fmt.Fprintf(&b, "\n")
+		if len(summary.Ablation.Strata) > 0 {
+			fmt.Fprintf(&b, "### Stratified accuracy\n\n")
+			fmt.Fprintf(&b, "| Dimension | Value | Full | Visible | Raw |\n")
+			fmt.Fprintf(&b, "|---|---|---:|---:|---:|\n")
+			for _, stratum := range summary.Ablation.Strata {
+				accuracies := map[EvidenceMode]float64{}
+				for _, group := range stratum.Groups {
+					accuracies[group.Mode] = group.Accuracy
+				}
+				fmt.Fprintf(&b, "| `%s` | `%s` | %.2f%% | %.2f%% | %.2f%% |\n",
+					stratum.Dimension, stratum.Value,
+					accuracies[EvidenceModeFull]*100,
+					accuracies[EvidenceModeVisibleUnenforced]*100,
+					accuracies[EvidenceModeRawUnenforced]*100)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+		if len(summary.Ablation.ErrorCounts) > 0 {
+			fmt.Fprintf(&b, "### Error types\n\n")
+			for _, count := range summary.Ablation.ErrorCounts {
+				fmt.Fprintf(&b, "- `%s/%s`: %d\n", count.Mode, count.ErrorType, count.Count)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+	}
 
 	if len(summary.ToolCallCounts) > 0 {
 		fmt.Fprintf(&b, "## Tool Calls\n\n")
@@ -215,6 +359,19 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 		fmt.Fprintf(&b, "### %s `%s`\n\n", status, result.ID)
 		if result.Variant != "" {
 			fmt.Fprintf(&b, "- Variant: `%s`\n", result.Variant)
+		}
+		if result.EvidenceMode != "" {
+			fmt.Fprintf(&b, "- Evidence mode: `%s`\n", result.EvidenceMode)
+			fmt.Fprintf(&b, "- Pair: `%s`\n", result.PairID)
+			fmt.Fprintf(&b, "- Payload: canonical=%s visible=%s bytes=%d estimated_tokens=%d\n",
+				result.CanonicalPayloadDigest, result.ModelVisiblePayloadDigest,
+				result.ModelVisiblePayloadBytes, result.ModelVisiblePayloadTokens)
+			if result.AblationScore != nil {
+				fmt.Fprintf(&b, "- Ablation score: correct=%v continuous=%.3f fact_f1=%.3f hallucination=%v abstention=%v\n",
+					result.AblationScore.CaseCorrect, result.AblationScore.AccuracyScore,
+					result.AblationScore.FactF1, result.AblationScore.CriticalHallucination,
+					result.AblationScore.AbstentionCorrect)
+			}
 		}
 		fmt.Fprintf(&b, "- Category: `%s`\n", result.Category)
 		fmt.Fprintf(&b, "- Attempt: %d\n", result.Attempt)
@@ -270,6 +427,9 @@ func markdownReport(summary RunSummary, results []EvalCaseResult) string {
 }
 
 func resultCaseKey(result EvalCaseResult) string {
+	if result.EvidenceMode != "" {
+		return result.ID + "/" + string(result.EvidenceMode)
+	}
 	if result.Variant == "" {
 		return result.ID
 	}

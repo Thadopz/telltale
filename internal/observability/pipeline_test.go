@@ -22,6 +22,8 @@ func TestAgentMetricsAreExported(t *testing.T) {
 	RecordAgentRoute(ctx, "payment_agent", "payment", errors.New("route failed"))
 	RecordWatchRule(ctx, "payment-success-rate", "payment", "payment_metric", "opened", nil)
 	RecordWatchCycle(ctx, 30*time.Millisecond, 3, nil)
+	RecordWatchDiagnosisJob(ctx, "claimed", "observability", "card-service", 10*time.Millisecond, nil)
+	RecordWatchDiagnosisJob(ctx, "succeeded", "observability", "card-service", 50*time.Millisecond, nil)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &metrics); err != nil {
@@ -38,6 +40,9 @@ func TestAgentMetricsAreExported(t *testing.T) {
 		"telltale.watcher.rules",
 		"telltale.watcher.rule.evaluations",
 		"telltale.watcher.incident.transitions",
+		"telltale.watcher.diagnosis.jobs",
+		"telltale.watcher.diagnosis.duration",
+		"telltale.watcher.diagnosis.queue.delay",
 	} {
 		if !names[expected] {
 			t.Fatalf("expected metric %s, got %#v", expected, names)

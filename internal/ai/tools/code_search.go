@@ -53,13 +53,14 @@ func NewCodeSearchTool(service *codeintel.Service) (tool.InvokableTool, error) {
 			if len(result.Hits) == 0 {
 				env.DataStatus = evidence.DataEmpty
 			}
-			env.SourceKind = codeSourceKind(result, input.PathScope)
-			env.Repository = result.Repository
-			env.Revision = result.Revision
-			env.SnapshotDigest = result.SnapshotDigest
-			env.VersionAlignment = evidence.VersionAlignment(result.VersionAlign)
-			env.RuntimeVerified = false
-			env.ContentTrust = evidence.ContentTrustUntrustedRepository
+			env.Evidence.Provenance = evidence.Provenance{
+				SourceKind:       codeSourceKind(result, input.PathScope),
+				Repository:       result.Repository,
+				Revision:         result.Revision,
+				SnapshotDigest:   result.SnapshotDigest,
+				VersionAlignment: evidence.VersionAlignment(result.VersionAlign),
+				PayloadTrust:     evidence.ContentTrustUntrustedRepository,
+			}
 			return evidence.Marshal(env), nil
 		})
 }
@@ -110,13 +111,14 @@ func NewCodeReadTool(service *codeintel.Service) (tool.InvokableTool, error) {
 				},
 				Summary: "static source snippet; runtime execution is not verified",
 			}})
-			env.SourceKind = kind
-			env.Repository = result.Repository
-			env.Revision = result.Revision
-			env.SnapshotDigest = result.SnapshotDigest
-			env.VersionAlignment = evidence.VersionAlignment(result.VersionAlign)
-			env.RuntimeVerified = false
-			env.ContentTrust = evidence.ContentTrustUntrustedRepository
+			env.Evidence.Provenance = evidence.Provenance{
+				SourceKind:       kind,
+				Repository:       result.Repository,
+				Revision:         result.Revision,
+				SnapshotDigest:   result.SnapshotDigest,
+				VersionAlignment: evidence.VersionAlignment(result.VersionAlign),
+				PayloadTrust:     evidence.ContentTrustUntrustedRepository,
+			}
 			return evidence.Marshal(env), nil
 		})
 }

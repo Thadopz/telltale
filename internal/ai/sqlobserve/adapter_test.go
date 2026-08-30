@@ -23,10 +23,10 @@ func TestUnsupportedDatabaseCapabilityDoesNotOpenAConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query unsupported adapter: %v", err)
 	}
-	if envelope.Status != evidence.StatusUnknown || envelope.DataStatus != evidence.DataUnknown {
-		t.Fatalf("expected unknown capability result, got %#v", envelope)
+	if envelope.Status != evidence.StatusError || envelope.DataStatus != evidence.DataUnknown {
+		t.Fatalf("expected capability failure, got %#v", envelope)
 	}
-	if envelope.FailureReason != "capability_not_supported" || envelope.EvidenceID != "" || envelope.CanUseAsEvidence {
+	if envelope.Failure == nil || envelope.Failure.Reason != "capability_not_supported" || envelope.Evidence != nil {
 		t.Fatalf("unexpected unsupported capability envelope: %#v", envelope)
 	}
 	data, ok := envelope.Data.(map[string]any)
@@ -78,10 +78,10 @@ func TestObserverAddsDatabaseIdentityToEvidenceScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query observer: %v", err)
 	}
-	if envelope.Status != evidence.StatusSuccess || len(envelope.Observations) != 1 {
+	if envelope.Status != evidence.StatusSuccess || envelope.Evidence == nil || len(envelope.Evidence.Observations) != 1 {
 		t.Fatalf("expected structured evidence, got %#v", envelope)
 	}
-	scope := envelope.Observations[0].Scope.Fields
+	scope := envelope.Evidence.Observations[0].Scope.Fields
 	if scope["database_engine"] != string(EngineMySQL) || scope["target"] != "card_service_primary" || scope["capability"] != "slow_queries" {
 		t.Fatalf("database identity missing from observation scope: %#v", scope)
 	}
@@ -114,7 +114,7 @@ storage:
 	if err != nil {
 		t.Fatalf("query configured observer: %v", err)
 	}
-	if envelope.FailureReason != "capability_not_supported" || envelope.EvidenceID != "" {
+	if envelope.Failure == nil || envelope.Failure.Reason != "capability_not_supported" || envelope.Evidence != nil {
 		t.Fatalf("expected Telltale SQLite to remain unavailable as a business observer: %#v", envelope)
 	}
 }

@@ -1,9 +1,9 @@
 package models
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -20,7 +20,7 @@ func OpenAIForDeepSeekV31Think(ctx context.Context) (cm model.ToolCallingChatMod
 	if err != nil {
 		return nil, err
 	}
-	return cm, nil
+	return wrapProviderCacheModel(ctx, cm, config.Model)
 }
 
 func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatModel, err error) {
@@ -32,7 +32,7 @@ func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatMode
 	if err != nil {
 		return nil, err
 	}
-	return cm, nil
+	return wrapProviderCacheModel(ctx, cm, config.Model)
 }
 
 func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) {
@@ -45,7 +45,7 @@ func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) 
 	if err != nil {
 		return nil, fmt.Errorf("create failover chat model: %w", err)
 	}
-	return chatModel, nil
+	return wrapProviderCacheModel(ctx, chatModel, config.Model)
 }
 
 func configuredOpenAIChatModel(ctx context.Context, configKey string) (*openai.ChatModelConfig, error) {

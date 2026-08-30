@@ -86,6 +86,28 @@ func TestConvergeAnswerRejectsExtractorFailureWithoutKeywordFallback(t *testing.
 	}
 }
 
+func TestConvergeAnswerAllowsValidatedFallbackForSystemIncident(t *testing.T) {
+	item := structuredToolEvidence("runtime_logs", "ev_log", evidence.SourceRuntimeLog, evidence.ObservationLogError, evidence.SubjectRef{Service: "card-service"})
+	pipelineResult := &ClaimPipelineResult{}
+	answer, err := ConvergeAnswer(context.Background(), AnswerConvergeInput{
+		Question:                "system-generated card-service incident",
+		Answer:                  "Profile dependency failed according to ev_log.",
+		ToolEvidence:            []trace.ToolEvidence{item},
+		ClaimExtractor:          &fixedClaimExtractor{err: context.DeadlineExceeded},
+		PipelineResult:          pipelineResult,
+		AllowExtractionFallback: true,
+	})
+	if err != nil {
+		t.Fatalf("system incident fallback returned error: %v", err)
+	}
+	if answer != "Profile dependency failed according to ev_log." {
+		t.Fatalf("unexpected fallback answer: %q", answer)
+	}
+	if pipelineResult.ExtractionError == "" || pipelineResult.LocalizationMode != "validated_draft_fallback" {
+		t.Fatalf("fallback metadata was not retained: %#v", pipelineResult)
+	}
+}
+
 func TestConvergeAnswerRequiresExplicitEvidenceReference(t *testing.T) {
 	item := structuredToolEvidence("runtime_logs", "ev_log", evidence.SourceRuntimeLog, evidence.ObservationLogError, evidence.SubjectRef{Service: "payment"})
 	answer, err := ConvergeAnswer(context.Background(), AnswerConvergeInput{
@@ -113,14 +135,11 @@ func TestConvergeAnswerRequiresExplicitEvidenceReference(t *testing.T) {
 }
 
 func TestConvergeAnswerUsesFailedQueryAsUnknownOnly(t *testing.T) {
+	failureEnvelope := evidence.NewFailure(evidence.StatusTimeout, "TIMEOUT", "query_timeout", "log query timed out")
+	failureEnvelope.Failure.QueryID = "fq_logs"
 	failed := trace.ToolEvidence{
 		ToolName: "runtime_logs",
-		Envelope: evidence.Envelope{
-			Success:       false,
-			Status:        evidence.StatusTimeout,
-			FailedQueryID: "fq_logs",
-			Summary:       "log query timed out",
-		},
+		Envelope: failureEnvelope,
 	}
 	answer, err := ConvergeAnswer(context.Background(), AnswerConvergeInput{
 		Question:     "check logs",
@@ -246,27 +265,16 @@ func TestCustomLocalizerCannotAddEvidenceOutsideCoverageReport(t *testing.T) {
 }
 
 func structuredToolEvidence(name string, evidenceID string, sourceKind evidence.EvidenceSourceKind, observationKind string, subject evidence.SubjectRef) trace.ToolEvidence {
-	env := evidence.Envelope{
-		Success:          true,
-		Status:           evidence.StatusSuccess,
-		EvidenceID:       evidenceID,
-		CanUseAsEvidence: true,
-		DataStatus:       evidence.DataPresent,
-		SourceKind:       sourceKind,
-		RuntimeVerified:  sourceKind == evidence.SourceRuntimeMetric || sourceKind == evidence.SourceRuntimeLog || sourceKind == evidence.SourceRuntimeDB,
-		ObservedAt:       time.Now().UTC(),
-		Subject:          subject,
-		Observations: []evidence.Observation{{
-			Kind:    observationKind,
-			Subject: subject,
-		}},
-		Summary: "structured runtime evidence",
-	}
+	env := evidence.NewDataWithObservations(nil, "structured runtime evidence", []evidence.Observation{{
+		Kind:    observationKind,
+		Subject: subject,
+	}})
+	env.Evidence.EvidenceID = evidenceID
+	env.Evidence.Provenance.SourceKind = sourceKind
+	env.Evidence.Provenance.RuntimeVerified = sourceKind == evidence.SourceRuntimeMetric || sourceKind == evidence.SourceRuntimeLog || sourceKind == evidence.SourceRuntimeDB
+	env.Evidence.Attestation.ObservedAt = time.Now().UTC()
 	return trace.ToolEvidence{
-		ToolName:   name,
-		Envelope:   env,
-		EvidenceID: evidenceID,
-		Status:     env.Status,
-		Summary:    env.Summary,
+		ToolName: name,
+		Envelope: env,
 	}
 }

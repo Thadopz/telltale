@@ -23,6 +23,11 @@ func (f *fakeDiagnosticService) DiagnoseStream(_ context.Context, request diagno
 	return f.result, nil
 }
 
+func (f *fakeDiagnosticService) DiagnoseIncident(_ context.Context, request diagnosis.IncidentDiagnoseRequest) (diagnosis.DiagnoseResult, error) {
+	f.request = diagnosis.DiagnoseRequest{ConversationID: "watch-" + request.JobID}
+	return f.result, nil
+}
+
 func TestChatUsesSharedDiagnosticService(t *testing.T) {
 	service := &fakeDiagnosticService{result: diagnosis.DiagnoseResult{
 		Answer:         "answer",

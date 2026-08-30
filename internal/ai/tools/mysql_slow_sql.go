@@ -17,20 +17,24 @@ const (
 )
 
 type MysqlSlowSQLInput struct {
-	Target string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to default; never provide a DSN or server credentials"`
-	Source string `json:"source,omitempty" jsonschema:"description=Slow SQL source: performance_schema, sys, slow_log, or auto. Defaults to performance_schema"`
-	Window string `json:"window,omitempty" jsonschema:"description=Optional observation window such as 5m or 30m"`
-	SortBy string `json:"sort_by,omitempty" jsonschema:"description=Sort mode: avg_latency, total_latency, rows_examined, exec_count, query_time, or recent. Defaults depend on source"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return. Values are clamped to 1..100; default is 20"`
+	Target    string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to default; never provide a DSN or server credentials"`
+	Source    string `json:"source,omitempty" jsonschema:"description=Slow SQL source: performance_schema, sys, slow_log, or auto. Defaults to performance_schema"`
+	StartTime string `json:"start_time,omitempty" jsonschema:"description=Inclusive RFC3339 start time; must be used together with end_time and not with window"`
+	EndTime   string `json:"end_time,omitempty" jsonschema:"description=Exclusive RFC3339 end time; must be used together with start_time and not with window"`
+	Window    string `json:"window,omitempty" jsonschema:"description=Relative window such as 5m or 30m; anchored to the target database clock"`
+	SortBy    string `json:"sort_by,omitempty" jsonschema:"description=Sort mode: avg_latency, total_latency, rows_examined, exec_count, query_time, or recent. Defaults depend on source"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return. Values are clamped to 1..100; default is 20"`
 }
 
 // DBSlowQueriesInput is the database-agent input. It deliberately omits the
 // adapter-specific source field; the configured adapter chooses its source.
 type DBSlowQueriesInput struct {
-	Target string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to the configured default target"`
-	Window string `json:"window,omitempty" jsonschema:"description=Optional observation window such as 5m or 30m"`
-	SortBy string `json:"sort_by,omitempty" jsonschema:"description=Generic sort mode such as latency, frequency, resource, or recent"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return; the server applies the configured limit"`
+	Target    string `json:"target,omitempty" jsonschema:"description=Logical database target name. Defaults to the configured default target"`
+	StartTime string `json:"start_time,omitempty" jsonschema:"description=Inclusive RFC3339 start time; must be used together with end_time and not with window"`
+	EndTime   string `json:"end_time,omitempty" jsonschema:"description=Exclusive RFC3339 end time; must be used together with start_time and not with window"`
+	Window    string `json:"window,omitempty" jsonschema:"description=Relative window such as 5m or 30m; defaults to the last 30m using the target database clock"`
+	SortBy    string `json:"sort_by,omitempty" jsonschema:"description=Generic sort mode such as latency, frequency, resource, or recent"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"description=Maximum rows to return; the server applies the configured limit"`
 }
 
 type mysqlSlowSQLQuery struct {
@@ -50,13 +54,16 @@ func NewDBSlowQueriesTool() (tool.InvokableTool, error) {
 			}
 			budget := sqlobserve.LoadResultBudget(ctx)
 			return runConfiguredSQLObservation(ctx, sqlobserve.QueryRequest{
-				Kind:     sqlobserve.QuerySlowSQL,
-				Target:   input.Target,
-				Source:   "auto",
-				Window:   input.Window,
-				SortBy:   input.SortBy,
-				Limit:    budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
-				MaxBytes: budget.AgentMaxBytes,
+				Kind:             sqlobserve.QuerySlowSQL,
+				Target:           input.Target,
+				Source:           "auto",
+				StartTime:        input.StartTime,
+				EndTime:          input.EndTime,
+				Window:           input.Window,
+				DefaultTimeRange: true,
+				SortBy:           input.SortBy,
+				Limit:            budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
+				MaxBytes:         budget.AgentMaxBytes,
 			})
 		},
 	)
@@ -76,13 +83,16 @@ func NewMysqlSlowSQLTool() (tool.InvokableTool, error) {
 				return marshalToolError(err, "load mysql observation configuration failed"), nil
 			}
 			envelope, queryErr := observer.Query(ctx, sqlobserve.QueryRequest{
-				Kind:     sqlobserve.QuerySlowSQL,
-				Target:   input.Target,
-				Source:   input.Source,
-				Window:   input.Window,
-				SortBy:   input.SortBy,
-				Limit:    budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
-				MaxBytes: budget.AgentMaxBytes,
+				Kind:             sqlobserve.QuerySlowSQL,
+				Target:           input.Target,
+				Source:           input.Source,
+				StartTime:        input.StartTime,
+				EndTime:          input.EndTime,
+				Window:           input.Window,
+				DefaultTimeRange: true,
+				SortBy:           input.SortBy,
+				Limit:            budget.AgentLimit(input.Limit, defaultSlowSQLLimit),
+				MaxBytes:         budget.AgentMaxBytes,
 			})
 			if queryErr != nil {
 				return marshalToolError(queryErr, "execute mysql slow sql query failed"), nil

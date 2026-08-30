@@ -238,7 +238,10 @@ func CompleteTimeRange(query string, intent string, now time.Time) *TimeRange {
 		start := dayStart(yesterday)
 		return &TimeRange{Start: start, End: start.Add(24*time.Hour - time.Second), Source: "explicit", Description: "yesterday"}
 	}
-	if match := regexp.MustCompile(`最近\s*(\d+)\s*(分钟|分|小时|个小时)`).FindStringSubmatch(normalized); len(match) > 2 {
+	if containsAny(normalized, "过去半小时", "近半小时", "最近半小时") {
+		return &TimeRange{Start: now.Add(-30 * time.Minute), End: now, Source: "relative", Description: "relative recent window"}
+	}
+	if match := regexp.MustCompile(`(?:最近|过去|近)\s*(\d+)\s*(分钟|分|小时|个小时)`).FindStringSubmatch(normalized); len(match) > 2 {
 		n, _ := strconv.Atoi(match[1])
 		if n > 0 {
 			unit := match[2]
@@ -249,7 +252,7 @@ func CompleteTimeRange(query string, intent string, now time.Time) *TimeRange {
 			return &TimeRange{Start: now.Add(-duration), End: now, Source: "relative", Description: "relative recent window"}
 		}
 	}
-	if match := regexp.MustCompile(`(?i)last\s+(\d+)\s*(m|min|minute|minutes|h|hour|hours)`).FindStringSubmatch(normalized); len(match) > 2 {
+	if match := regexp.MustCompile(`(?i)(?:last|past)\s+(\d+)\s*(m|min|minute|minutes|h|hour|hours)`).FindStringSubmatch(normalized); len(match) > 2 {
 		n, _ := strconv.Atoi(match[1])
 		if n > 0 {
 			duration := time.Duration(n) * time.Minute
@@ -266,6 +269,28 @@ func CompleteTimeRange(query string, intent string, now time.Time) *TimeRange {
 		return &TimeRange{Start: now.Add(-30 * time.Minute), End: now, Source: "default", Description: "missing time range; default 30 minutes for investigation/query"}
 	}
 	return nil
+}
+
+// NeedsCurrentTime reports whether a request needs the wall clock in its model
+// context. A closed range such as "yesterday" does not need a volatile time
+// message, while live investigations and relative ranges do.
+func NeedsCurrentTime(processed ProcessedInput) bool {
+	normalized := strings.ToLower(processed.CleanQuery)
+	isKnowledgeRequest := processed.Domain == DomainKnowledge || containsAny(normalized, "文档", "知识库", "手册", "runbook", "sop", "manual")
+	if processed.TimeRange == nil || isKnowledgeRequest {
+		return false
+	}
+
+	switch processed.TimeRange.Source {
+	case "relative":
+		return true
+	case "explicit":
+		return processed.TimeRange.Description == "today"
+	case "default":
+		return processed.Intent == IntentDiagnose || processed.Intent == IntentQuery || processed.Intent == IntentReport
+	default:
+		return false
+	}
 }
 
 func BuildToolHints(p ProcessedInput) []ToolHint {

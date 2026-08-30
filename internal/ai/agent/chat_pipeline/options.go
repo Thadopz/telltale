@@ -2,6 +2,7 @@ package chat_pipeline
 
 import (
 	"github.com/Thadopz/telltale/internal/ai/contextbudget"
+	aitools "github.com/Thadopz/telltale/internal/ai/tools"
 	"github.com/Thadopz/telltale/internal/authz"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -18,4 +19,9 @@ type ChatAgentOptions struct {
 	PromptOverheadTokens   int
 	DisableToolSearch      bool
 	AgentScope             authz.AgentScope
+	AllowedDomains         []aitools.Domain
+	AllowedToolNames       map[aitools.Domain][]string
+	// EvalEvidenceMode is used only by the in-process evidence ablation
+	// harness. Production callers leave it empty.
+	EvalEvidenceMode string
 }

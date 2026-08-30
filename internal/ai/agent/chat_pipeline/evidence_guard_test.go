@@ -23,7 +23,6 @@ func TestMatchClaimSetUsesExplicitEvidenceAndUnifiedRules(t *testing.T) {
 		SourceKind:      evidence.SourceRuntimeLog,
 		RuntimeVerified: true,
 		ObservedAt:      time.Now().UTC(),
-		Subject:         evidence.SubjectRef{Service: "payment"},
 		Observations:    []evidence.Observation{{Kind: evidence.ObservationLogError, Subject: evidence.SubjectRef{Service: "payment"}}},
 	}}, nil)
 	if len(reports) != 1 || reports[0].Status != evidence.CoverageCovered {
@@ -32,20 +31,14 @@ func TestMatchClaimSetUsesExplicitEvidenceAndUnifiedRules(t *testing.T) {
 }
 
 func TestEvidenceFromToolEvidenceKeepsStructuredEnvelope(t *testing.T) {
+	envelope := evidence.NewDataWithObservations(nil, "runtime log", []evidence.Observation{{Kind: evidence.ObservationLogError}})
+	envelope.Evidence.EvidenceID = "ev_log"
+	envelope.Evidence.Provenance.SourceKind = evidence.SourceRuntimeLog
+	envelope.Evidence.Provenance.RuntimeVerified = true
+	envelope.Evidence.Attestation.ObservedAt = time.Now().UTC()
 	items, failed := evidenceFromToolEvidence([]trace.ToolEvidence{{
 		ToolName: "runtime_logs",
-		Envelope: evidence.Envelope{
-			Success:          true,
-			Status:           evidence.StatusSuccess,
-			EvidenceID:       "ev_log",
-			CanUseAsEvidence: true,
-			SourceKind:       evidence.SourceRuntimeLog,
-			RuntimeVerified:  true,
-			ObservedAt:       time.Now().UTC(),
-			Observations: []evidence.Observation{{
-				Kind: evidence.ObservationLogError,
-			}},
-		},
+		Envelope: envelope,
 	}})
 	if len(failed) != 0 || len(items) != 1 {
 		t.Fatalf("expected one structured evidence item, items=%#v failed=%#v", items, failed)

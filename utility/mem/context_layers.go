@@ -28,9 +28,18 @@ type durableMemoryRow struct {
 }
 
 func LoadContextLayers(ctx context.Context, userID string, conversationID string) (ContextLayers, error) {
+	principal := MemoryPrincipal{TenantID: "local", UserID: userID}
+	return loadContextLayersForScope(ctx, principal, normalizeMemoryScope(userID, conversationID), "")
+}
+
+func LoadContextLayersForQuery(ctx context.Context, principal MemoryPrincipal, conversationID string, query string) (ContextLayers, error) {
+	scope := normalizeMemoryScope(principal.UserID, TenantConversationID(principal, conversationID))
+	return loadContextLayersForScope(ctx, principal, scope, query)
+}
+
+func loadContextLayersForScope(ctx context.Context, principal MemoryPrincipal, scope memoryScope, query string) (ContextLayers, error) {
 	var layers ContextLayers
 
-	scope := normalizeMemoryScope(userID, conversationID)
 	if scope.StorageID != "" {
 		state, err := loadSessionStateRow(ctx, scope.StorageID)
 		if err != nil {
@@ -44,6 +53,14 @@ func LoadContextLayers(ctx context.Context, userID string, conversationID string
 	}
 
 	if strings.TrimSpace(scope.UserID) == "" {
+		return layers, nil
+	}
+	if ConfiguredMemory(ctx).Mode == MemoryModeActive {
+		memoryContext, err := loadProfileEventContext(ctx, principal, query)
+		if err != nil {
+			return layers, err
+		}
+		layers.DurableMemory = memoryContext
 		return layers, nil
 	}
 

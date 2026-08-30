@@ -20,7 +20,7 @@ func BuildMySQLQueryPlan(request QueryRequest, budget ResultBudget) (QueryPlan, 
 
 	switch request.Kind {
 	case QuerySlowSQL:
-		plan, err := buildSlowSQLPlan(source, sortBy, limit, budget.MaxSQLTextChars)
+		plan, err := buildSlowSQLPlan(source, sortBy, limit, budget.MaxSQLTextChars, request.ResolvedTimeRange)
 		if err != nil {
 			return QueryPlan{}, err
 		}
@@ -81,7 +81,7 @@ func BuildQueryPlan(request QueryRequest, budget ResultBudget) (QueryPlan, error
 	return BuildMySQLQueryPlan(request, budget)
 }
 
-func buildSlowSQLPlan(source string, sortBy string, limit int, maxTextChars int) (QueryPlan, error) {
+func buildSlowSQLPlan(source string, sortBy string, limit int, maxTextChars int, timeRange *TimeRange) (QueryPlan, error) {
 	if source == "" {
 		source = "performance_schema"
 	}
@@ -157,6 +157,12 @@ LIMIT %d`, maxTextChars, orderBy, limit),
 		if err != nil {
 			return QueryPlan{}, err
 		}
+		whereClause := ""
+		var args []any
+		if timeRange != nil {
+			whereClause = "WHERE start_time >= ? AND start_time < ?\n"
+			args = []any{timeRange.Start.UTC(), timeRange.End.UTC()}
+		}
 		return QueryPlan{
 			Kind:   QuerySlowSQL,
 			Source: source,
@@ -172,8 +178,11 @@ LIMIT %d`, maxTextChars, orderBy, limit),
   db,
   LEFT(sql_text, %d) AS sql_text
 FROM mysql.slow_log
+%s
 ORDER BY %s DESC
-LIMIT %d`, maxTextChars, orderBy, limit),
+LIMIT %d`, maxTextChars, whereClause, orderBy, limit),
+			Args:            args,
+			TimeRange:       timeRange,
 			Projection:      []string{"start_time", "user_host", "query_time", "lock_time", "rows_sent", "rows_examined", "db", "sql_text"},
 			ObservationKind: "slow_sql",
 			LargeTextFields: []string{"sql_text"},

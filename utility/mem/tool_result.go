@@ -1,10 +1,10 @@
 package mem
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"strings"
 	"sync"
 
@@ -148,19 +148,13 @@ func (r *toolResultRecorder) onError(ctx context.Context, info *callbacks.RunInf
 func formatEnvelopeSummary(env evidence.Envelope, raw string) string {
 	summary := strings.TrimSpace(env.Summary)
 	if summary == "" {
-		summary = strings.TrimSpace(env.Message)
-	}
-	if summary == "" {
-		summary = strings.TrimSpace(env.Error)
-	}
-	if summary == "" {
 		summary = strings.TrimSpace(raw)
 	}
-	if env.CanUseAsEvidence && strings.TrimSpace(env.EvidenceID) != "" {
-		return fmt.Sprintf("%s evidence_id=%s data_status=%s%s", summary, env.EvidenceID, env.DataStatus, resultMetadataSummary(env.ResultMetadata))
+	if record, ok := env.UsableEvidence(); ok {
+		return fmt.Sprintf("%s evidence_id=%s data_status=%s%s", summary, record.EvidenceID, env.DataStatus, resultMetadataSummary(record.ResultMetadata))
 	}
-	if strings.TrimSpace(env.FailedQueryID) != "" {
-		return fmt.Sprintf("%s failed_query_id=%s data_status=%s%s", summary, env.FailedQueryID, env.DataStatus, resultMetadataSummary(env.ResultMetadata))
+	if env.Failure != nil {
+		return fmt.Sprintf("%s failed_query_id=%s data_status=%s", summary, env.Failure.QueryID, env.DataStatus)
 	}
 	return summary
 }
@@ -212,35 +206,9 @@ func ListUsableEvidence(ctx context.Context, conversationID string, limit int) (
 	items := make([]evidence.EvidenceItem, 0, len(rows))
 	for _, row := range rows {
 		env := evidence.Parse(row.Output).Envelope
-		if env.Status != evidence.StatusSuccess || !env.CanUseAsEvidence || strings.TrimSpace(env.EvidenceID) == "" || len(env.Observations) == 0 {
-			continue
+		if item, ok := env.ToEvidenceItem(row.ToolName); ok {
+			items = append(items, item)
 		}
-		items = append(items, evidence.EvidenceItem{
-			EvidenceID:       env.EvidenceID,
-			ToolName:         row.ToolName,
-			SourceKind:       env.SourceKind,
-			Repository:       env.Repository,
-			Revision:         env.Revision,
-			SnapshotDigest:   env.SnapshotDigest,
-			VersionAlignment: env.VersionAlignment,
-			RuntimeVerified:  env.RuntimeVerified,
-			ContentTrust:     env.ContentTrust,
-			Issuer:           env.Issuer,
-			RunID:            env.RunID,
-			ConversationID:   env.ConversationID,
-			TenantID:         env.TenantID,
-			ObservedAt:       env.ObservedAt,
-			ExpiresAt:        env.ExpiresAt,
-			ContentDigest:    env.ContentDigest,
-			TrustLevel:       env.TrustLevel,
-			OperationID:      env.OperationID,
-			ResultMetadata:   env.ResultMetadata,
-			Scope:            env.Scope,
-			Subject:          env.Subject,
-			Observations:     env.Observations,
-			RawOutput:        json.RawMessage(row.Output),
-			Summary:          env.Summary,
-		})
 	}
 	return items, nil
 }
@@ -253,15 +221,9 @@ func ListFailedQueries(ctx context.Context, conversationID string, limit int) ([
 	items := make([]evidence.FailedQuery, 0, len(rows))
 	for _, row := range rows {
 		env := evidence.Parse(row.Output).Envelope
-		if strings.TrimSpace(env.FailedQueryID) == "" {
-			continue
+		if failedQuery, ok := env.ToFailedQuery(row.ToolName); ok {
+			items = append(items, failedQuery)
 		}
-		items = append(items, evidence.FailedQuery{
-			FailedQueryID: env.FailedQueryID,
-			ToolName:      row.ToolName,
-			Status:        env.Status,
-			Summary:       env.Summary,
-		})
 	}
 	return items, nil
 }
@@ -301,27 +263,30 @@ func loadEvidenceRows(ctx context.Context, conversationID string, limit int) ([]
 
 func structuredEvidenceColumns(env evidence.Envelope) g.Map {
 	columns := g.Map{
-		"evidence_id":         env.EvidenceID,
-		"failed_query_id":     env.FailedQueryID,
-		"can_use_as_evidence": env.CanUseAsEvidence,
 		"data_status":         env.DataStatus,
-		"issuer":              env.Issuer,
-		"run_id":              env.RunID,
-		"tenant_id":           env.TenantID,
-		"observed_at":         env.ObservedAt,
-		"expires_at":          env.ExpiresAt,
-		"content_digest":      env.ContentDigest,
-		"trust_level":         env.TrustLevel,
-		"operation_id":        env.OperationID,
-		"result_metadata":     marshalJSONValue(env.ResultMetadata),
+		"can_use_as_evidence": false,
 	}
-	if subject, err := json.Marshal(env.Subject); err == nil && string(subject) != "{}" {
-		columns["subject"] = string(subject)
+	if env.Failure != nil {
+		columns["failed_query_id"] = env.Failure.QueryID
 	}
-	if scope, err := json.Marshal(env.Scope); err == nil && string(scope) != "{}" {
-		columns["scope"] = string(scope)
+	if env.Operation != nil {
+		columns["operation_id"] = env.Operation.OperationID
 	}
-	if observations, err := json.Marshal(env.Observations); err == nil && string(observations) != "null" {
+	record, ok := env.UsableEvidence()
+	if !ok {
+		return columns
+	}
+	columns["evidence_id"] = record.EvidenceID
+	columns["can_use_as_evidence"] = true
+	columns["issuer"] = record.Attestation.Issuer
+	columns["run_id"] = record.Attestation.RunID
+	columns["tenant_id"] = record.Attestation.TenantID
+	columns["observed_at"] = record.Attestation.ObservedAt
+	columns["expires_at"] = record.Attestation.ExpiresAt
+	columns["content_digest"] = record.Attestation.ContentDigest
+	columns["trust_level"] = record.Attestation.IssuerTrust
+	columns["result_metadata"] = marshalJSONValue(record.ResultMetadata)
+	if observations, err := json.Marshal(record.Observations); err == nil && string(observations) != "null" {
 		columns["observations"] = string(observations)
 	}
 	return columns

@@ -11,6 +11,7 @@ import (
 	"github.com/Thadopz/telltale/internal/diagnosis"
 	"github.com/Thadopz/telltale/internal/observability"
 	"github.com/Thadopz/telltale/utility/common"
+	"github.com/Thadopz/telltale/utility/mem"
 	"github.com/Thadopz/telltale/utility/storage"
 	"github.com/gogf/gf/v2/frame/g"
 )
@@ -20,6 +21,7 @@ import (
 // storage themselves.
 type Runtime struct {
 	Diagnostic diagnosis.DiagnosticService
+	Memory     *mem.MemoryWorker
 	Close      func(context.Context) error
 }
 
@@ -45,6 +47,7 @@ func New(ctx context.Context) (*Runtime, error) {
 	}
 	return &Runtime{
 		Diagnostic: diagnosis.NewService(),
+		Memory:     mem.NewMemoryWorker(),
 		Close:      shutdown,
 	}, nil
 }

@@ -12,10 +12,11 @@ import (
 // runtime envelope. The extracted values help code_search stay anchored to
 // live evidence instead of broad repository browsing.
 func RecordRuntimeAnchors(ctx context.Context, env Envelope) {
-	if env.Status != StatusSuccess || env.EvidenceID == "" {
+	record, ok := env.UsableEvidence()
+	if !ok {
 		return
 	}
-	if env.SourceKind == SourceStaticCode || env.SourceKind == SourceStaticConfig {
+	if record.Provenance.SourceKind == SourceStaticCode || record.Provenance.SourceKind == SourceStaticConfig {
 		return
 	}
 	store := AnchorStoreFromContext(ctx)
@@ -29,21 +30,15 @@ func RecordRuntimeAnchors(ctx context.Context, env Envelope) {
 			return
 		}
 		store.Add(CodeAnchor{
-			ID:               anchorID(env.EvidenceID, kind, value),
+			ID:               anchorID(record.EvidenceID, kind, value),
 			Kind:             kind,
 			Value:            value,
-			SourceEvidenceID: env.EvidenceID,
+			SourceEvidenceID: record.EvidenceID,
 			Confidence:       confidence,
 		})
 	}
 
-	addAnchor("service_name", env.Subject.Service, 1)
-	addAnchor("order_no", env.Subject.OrderNo, 1)
-	addAnchor("trace_id", env.Subject.TraceID, 1)
-	for key, value := range env.Subject.Fields {
-		addAnchor(anchorKind(key), value, 0.9)
-	}
-	for _, observation := range env.Observations {
+	for _, observation := range record.Observations {
 		for key, value := range observation.Fields {
 			addAnchor(anchorKind(key), fmt.Sprint(value), 0.85)
 		}
