@@ -309,7 +309,7 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 	}
 	switch p.Domain {
 	case DomainPayment, DomainOrder, DomainNotify:
-		add("payment_agent", "payment, order, or notification domain")
+		add("observability_agent", "payment, order, or notification observations")
 	case DomainSlowSQL:
 		add("database_agent", "database and slow SQL domain")
 	case DomainAlert:
@@ -320,11 +320,11 @@ func BuildToolHints(p ProcessedInput) []ToolHint {
 		add("knowledge_agent", "internal documentation domain")
 	}
 	if p.Entities["payment_order_no"] != "" {
-		add("payment_agent", "payment order domain")
+		add("observability_agent", "payment order observations")
 	}
 	if p.Entities["trace_id"] != "" && p.Domain != DomainSlowSQL {
 		if p.Domain == DomainPayment || p.Domain == DomainOrder || p.Domain == DomainNotify {
-			add("payment_agent", "payment trace domain")
+			add("observability_agent", "payment trace observations")
 		} else {
 			add("observability_agent", "runtime trace domain")
 		}

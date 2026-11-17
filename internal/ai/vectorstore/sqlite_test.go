@@ -45,4 +45,7 @@ func TestKnowledgeVectorsRoundTripAndCosineOrdering(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("expected source documents to be deleted, got %d", count)
 	}
+	t.Run("replacement", checkReplaceSourceAtomicIdempotentAndIsolated)
+	t.Run("hybrid", checkHybridRetrieval)
+	t.Run("document-policy", checkDocumentPolicyRetrieval)
 }

@@ -1,10 +1,10 @@
 package retriever
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/embedder"
-	"github.com/Thadopz/telltale/internal/ai/vectorstore"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/embedder"
+	"github.com/Thadopz/telltale/internal/ai/vectorstore"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -49,7 +49,7 @@ func (r *SQLiteVectorRetriever) Retrieve(ctx context.Context, query string, opts
 	ctx = callbacks.OnStart(ctx, &einoretriever.CallbackInput{
 		Query: query,
 		TopK:  topK,
-		Extra: map[string]any{"retrieval": "sqlite_cosine"},
+		Extra: map[string]any{"retrieval": "sqlite_bm25_dense_rrf"},
 	})
 	defer func() {
 		if err != nil {
@@ -57,6 +57,17 @@ func (r *SQLiteVectorRetriever) Retrieve(ctx context.Context, query string, opts
 		}
 	}()
 
+	rrfK := 60
+	value, configErr := g.Cfg().Get(ctx, "knowledge_retrieval.rrf_k")
+	if configErr != nil {
+		return nil, configErr
+	}
+	if value != nil && !value.IsNil() {
+		rrfK = value.Int()
+	}
+	if rrfK <= 0 {
+		return nil, fmt.Errorf("knowledge_retrieval.rrf_k must be positive")
+	}
 	vectors, err := options.Embedding.EmbedStrings(ctx, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("embed sqlite knowledge query: %w", err)
@@ -68,7 +79,7 @@ func (r *SQLiteVectorRetriever) Retrieve(ctx context.Context, query string, opts
 	for index, value := range vectors[0] {
 		queryVector[index] = float32(value)
 	}
-	docs, err = vectorstore.SearchKnowledge(ctx, queryVector, topK)
+	docs, err = vectorstore.SearchHybridKnowledge(ctx, query, queryVector, topK, rrfK)
 	if err != nil {
 		return nil, fmt.Errorf("search sqlite knowledge vectors: %w", err)
 	}
@@ -77,7 +88,7 @@ func (r *SQLiteVectorRetriever) Retrieve(ctx context.Context, query string, opts
 }
 
 func (r *SQLiteVectorRetriever) GetType() string {
-	return "SQLiteCosineRetriever"
+	return "SQLiteHybridRetriever"
 }
 
 func (r *SQLiteVectorRetriever) IsCallbacksEnabled() bool {

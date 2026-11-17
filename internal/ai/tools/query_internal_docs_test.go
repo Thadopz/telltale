@@ -1,52 +1,18 @@
 package tools
 
 import (
-	"context"
-	"github.com/Thadopz/telltale/internal/ai/knowledge"
-	"strings"
-	"testing"
-
-	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
+	"testing"
 )
 
-type knowledgeToolRetriever struct {
-	calls int
-}
-
-func (r *knowledgeToolRetriever) Retrieve(context.Context, string, ...retriever.Option) ([]*schema.Document, error) {
-	r.calls++
-	return []*schema.Document{{Content: "shared knowledge result"}}, nil
-}
-
-func TestQueryInternalDocsUsesSessionQueryCache(t *testing.T) {
-	ctx := context.WithValue(context.Background(), "client_id", "tool-cache-"+t.Name())
-	searcher := &knowledgeToolRetriever{}
-	query := "payment callback runbook " + t.Name()
-
-	_, err := knowledge.DefaultService().Search(ctx, knowledge.SearchRequest{
-		SessionID:  "tool-cache-" + t.Name(),
-		Query:      query,
-		Retriever:  searcher,
-		SkipRerank: true,
-	})
-	if err != nil {
-		t.Fatalf("seed session query cache: %v", err)
+func TestKnowledgeEvidenceQuotesOnlySourceChunk(t *testing.T) {
+	doc := &schema.Document{ID: "a", Content: "原始运行手册规则", MetaData: map[string]any{"_source": "a.md", "_context_prefix": "模型生成的服务说明"}}
+	observations := knowledgeDocumentObservations([]*schema.Document{doc})
+	if len(observations) != 1 || observations[0].Fields["runbook_rule"] != doc.Content {
+		t.Fatal("generated context entered source quotation")
 	}
-
-	knowledgeTool, err := NewQueryInternalDocsTool()
-	if err != nil {
-		t.Fatalf("create knowledge tool: %v", err)
-	}
-	output, err := knowledgeTool.InvokableRun(ctx, `{"query":"PAYMENT   CALLBACK RUNBOOK `+t.Name()+`"}`)
-	if err != nil {
-		t.Fatalf("invoke knowledge tool: %v", err)
-	}
-
-	if searcher.calls != 1 {
-		t.Fatalf("expected tool not to access the retriever after a cached equivalent query, got %d calls", searcher.calls)
-	}
-	if !strings.Contains(output, "session query cache") {
-		t.Fatalf("expected cache result message, got %s", output)
+	meta := observations[0].Fields["metadata"].(map[string]any)
+	if meta["_context_prefix"] != "模型生成的服务说明" || meta["_source"] != "a.md" {
+		t.Fatal("context and provenance missing")
 	}
 }

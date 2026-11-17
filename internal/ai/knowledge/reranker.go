@@ -1,11 +1,12 @@
 package knowledge
 
 import (
-	"github.com/Thadopz/telltale/internal/observability"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/vectorstore"
+	"github.com/Thadopz/telltale/internal/observability"
 	"io"
 	"net/http"
 	"sort"
@@ -73,7 +74,7 @@ func Rerank(ctx context.Context, query string, documents []*schema.Document) (ra
 			contents = append(contents, "")
 			continue
 		}
-		contents = append(contents, document.Content)
+		contents = append(contents, vectorstore.RetrievalText(document))
 	}
 
 	requestBody := dashScopeRerankRequest{

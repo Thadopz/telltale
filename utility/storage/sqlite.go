@@ -140,6 +140,9 @@ func applySchemaMigrations(ctx context.Context, db gdb.DB) error {
 			return fmt.Errorf("record sqlite migration %d: %w", version, err)
 		}
 	}
+	if current < 7 {
+		return migrateKnowledgeSearch(ctx, db)
+	}
 	return nil
 }
 
@@ -252,35 +255,6 @@ func schemaStatements() []string {
 			state TEXT NOT NULL,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE TABLE IF NOT EXISTS durable_memories (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id TEXT NOT NULL,
-			memory_key TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			content TEXT NOT NULL,
-			metadata TEXT,
-			confidence REAL NOT NULL DEFAULT 1.0,
-			status TEXT NOT NULL DEFAULT 'active',
-			vector_status TEXT NOT NULL DEFAULT 'pending',
-			source_conversation_id TEXT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(user_id, memory_key)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_durable_memories_user_status_updated ON durable_memories(user_id, status, updated_at)`,
-		`CREATE TABLE IF NOT EXISTS durable_memory_candidates (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id TEXT NOT NULL,
-			memory_key TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			content TEXT NOT NULL,
-			confidence REAL NOT NULL DEFAULT 1.0,
-			source_conversation_id TEXT,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(user_id, memory_key)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_durable_memory_candidates_user_updated ON durable_memory_candidates(user_id, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS tool_results (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			conversation_id TEXT NOT NULL,
@@ -338,16 +312,7 @@ func schemaStatements() []string {
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_knowledge_documents_updated ON knowledge_documents(updated_at)`,
-		`CREATE TABLE IF NOT EXISTS durable_memory_vectors (
-			memory_id INTEGER PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			memory_key TEXT NOT NULL,
-			content TEXT NOT NULL,
-			status TEXT NOT NULL,
-			vector TEXT NOT NULL,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_durable_memory_vectors_scope ON durable_memory_vectors(user_id, memory_key, status)`,
+		`CREATE TABLE IF NOT EXISTS knowledge_index_revision (id INTEGER PRIMARY KEY CHECK(id = 1), revision TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS profile_slots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			tenant_id TEXT NOT NULL,

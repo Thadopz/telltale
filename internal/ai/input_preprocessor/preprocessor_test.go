@@ -29,7 +29,7 @@ func TestProcessRecognizesPaymentDiagnosis(t *testing.T) {
 	if got.TimeRange == nil || got.TimeRange.Source != "default" {
 		t.Fatalf("expected default time range, got %#v", got.TimeRange)
 	}
-	want := []string{"payment_agent"}
+	want := []string{"observability_agent"}
 	if !toolNamesEqual(got.ToolHints, want) {
 		t.Fatalf("expected tools %v, got %#v", want, got.ToolHints)
 	}
@@ -46,7 +46,7 @@ func TestProcessRecognizesOrderQueryAndEntities(t *testing.T) {
 	if got.Entities["trace_id"] != "tr-abc" || got.Entities["error_code"] != "ERR_PAY_TIMEOUT" {
 		t.Fatalf("expected trace and error code, got %#v", got.Entities)
 	}
-	want := []string{"payment_agent"}
+	want := []string{"observability_agent"}
 	if !toolNamesEqual(got.ToolHints, want) {
 		t.Fatalf("expected tools %v, got %#v", want, got.ToolHints)
 	}
@@ -151,7 +151,7 @@ func TestRiskAndMissingSlots(t *testing.T) {
 
 func TestFormatPromptIsStable(t *testing.T) {
 	got := Process(context.Background(), "查订单 PO202606080001", fixedNow).FormatPrompt()
-	for _, want := range []string{"Intent: query", "Domain: payment", "Entities: payment_order_no=PO202606080001", "Suggested Tools: payment_agent"} {
+	for _, want := range []string{"Intent: query", "Domain: payment", "Entities: payment_order_no=PO202606080001", "Suggested Tools: observability_agent"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected prompt to contain %q, got:\n%s", want, got)
 		}
@@ -162,7 +162,6 @@ func TestBuildToolHintsOnlySuggestsDomainAgents(t *testing.T) {
 	allowed := map[string]bool{
 		"observability_agent": true,
 		"database_agent":      true,
-		"payment_agent":       true,
 		"knowledge_agent":     true,
 	}
 	queries := []string{

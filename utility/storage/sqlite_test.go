@@ -55,7 +55,6 @@ func TestInitializeCreatesStandaloneSchema(t *testing.T) {
 		"pending_actions",
 		"tool_operations",
 		"knowledge_documents",
-		"durable_memory_vectors",
 		"profile_slots",
 		"profile_candidates",
 		"memory_events",
@@ -82,8 +81,8 @@ func TestInitializeCreatesStandaloneSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("expected six schema migrations, got %d", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("expected seven schema migrations, got %d", migrationCount)
 	}
 	metadataCount, err := g.DB().Model("retention_policy").Where("policy_key", "default").Count()
 	if err != nil {

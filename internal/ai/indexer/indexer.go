@@ -1,11 +1,13 @@
 package indexer
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/embedder"
-	"github.com/Thadopz/telltale/internal/ai/vectorstore"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/embedder"
+	"github.com/Thadopz/telltale/internal/ai/vectorstore"
+	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -46,47 +48,62 @@ func (i *SQLiteVectorIndexer) Store(ctx context.Context, docs []*schema.Document
 		return nil, fmt.Errorf("knowledge embedding is not configured")
 	}
 	texts := make([]string, 0, len(docs))
+	inputLimit, err := vectorstore.EmbeddingInputLimit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if docs[0] == nil {
+		return nil, fmt.Errorf("knowledge document is nil")
+	}
+	source, ok := docs[0].MetaData["_source"].(string)
+	if !ok || strings.TrimSpace(source) == "" {
+		return nil, fmt.Errorf("knowledge source is required")
+	}
+	var nonempty []*schema.Document
 	for _, doc := range docs {
 		if doc == nil {
 			return nil, fmt.Errorf("knowledge document is nil")
 		}
-		texts = append(texts, doc.Content)
+		if doc.MetaData["_source"] != source {
+			return nil, fmt.Errorf("knowledge indexing requires one source per invocation")
+		}
+		if strings.TrimSpace(doc.Content) == "" {
+			continue
+		}
+		nonempty = append(nonempty, doc)
+		texts = append(texts, vectorstore.RetrievalText(doc))
+		if len(texts[len(texts)-1]) > inputLimit {
+			return nil, fmt.Errorf("knowledge embedding input exceeds conservative byte budget %d", inputLimit)
+		}
 	}
-	vectors, err := options.Embedding.EmbedStrings(ctx, texts)
+	docs = nonempty
+	if len(docs) == 0 {
+		return []string{}, vectorstore.ReplaceKnowledgeSource(ctx, source, nil, nil, nil, nil)
+	}
+	var vectors [][]float64
+	for _, text := range texts {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		batch, embedErr := options.Embedding.EmbedStrings(callCtx, []string{text})
+		cancel()
+		if embedErr != nil {
+			return nil, fmt.Errorf("embed knowledge documents: %w", embedErr)
+		}
+		if len(batch) != 1 {
+			return nil, fmt.Errorf("knowledge embedding count mismatch: expected=1 actual=%d", len(batch))
+		}
+		vectors = append(vectors, batch[0])
+	}
+
+	ids, contents, metadataBytes, denseVectors, err := prepareKnowledgeColumns(ctx, docs, vectors)
 	if err != nil {
-		return nil, fmt.Errorf("embed knowledge documents: %w", err)
+		return nil, err
 	}
-	if len(vectors) != len(docs) {
-		return nil, fmt.Errorf("knowledge embedding count mismatch: documents=%d vectors=%d", len(docs), len(vectors))
-	}
-
-	ids = make([]string, 0, len(docs))
-	contents := make([]string, 0, len(docs))
-	metadata := make([]string, 0, len(docs))
-	denseVectors := make([][]float32, 0, len(docs))
-	for index, doc := range docs {
-		id := doc.ID
-		if id == "" {
-			id = uuid.NewString()
-		}
-		if len(vectors[index]) == 0 {
-			return nil, fmt.Errorf("knowledge vector for %s is empty", id)
-		}
-		metadataJSON, marshalErr := json.Marshal(doc.MetaData)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("marshal knowledge metadata: %w", marshalErr)
-		}
-		vector := make([]float32, len(vectors[index]))
-		for vectorIndex, value := range vectors[index] {
-			vector[vectorIndex] = float32(value)
-		}
-		ids = append(ids, id)
-		contents = append(contents, doc.Content)
-		metadata = append(metadata, string(metadataJSON))
-		denseVectors = append(denseVectors, vector)
+	metadata := make([]string, len(metadataBytes))
+	for index, encoded := range metadataBytes {
+		metadata[index] = string(encoded)
 	}
 
-	if err = vectorstore.UpsertKnowledgeDocuments(ctx, ids, contents, metadata, denseVectors); err != nil {
+	if err = vectorstore.ReplaceKnowledgeSource(ctx, source, ids, contents, metadata, denseVectors); err != nil {
 		return nil, fmt.Errorf("store sqlite knowledge vectors: %w", err)
 	}
 	callbacks.OnEnd(ctx, &einoindexer.CallbackOutput{IDs: ids})
@@ -102,6 +119,9 @@ func (i *SQLiteVectorIndexer) IsCallbacksEnabled() bool {
 }
 
 func prepareKnowledgeColumns(ctx context.Context, docs []*schema.Document, vectors [][]float64) ([]string, []string, [][]byte, [][]float32, error) {
+	if len(docs) != len(vectors) {
+		return nil, nil, nil, nil, fmt.Errorf("knowledge embedding count mismatch")
+	}
 	ids := make([]string, 0, len(docs))
 	contents := make([]string, 0, len(docs))
 	metadata := make([][]byte, 0, len(docs))

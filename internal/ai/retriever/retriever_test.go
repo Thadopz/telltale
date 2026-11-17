@@ -9,7 +9,7 @@ func TestSQLiteRetrieverUsesLocalVectorStore(t *testing.T) {
 	retriever, err := NewSQLiteRetriever(context.Background())
 	if err == nil {
 		local, ok := retriever.(*SQLiteVectorRetriever)
-		if !ok || local.GetType() != "SQLiteCosineRetriever" {
+		if !ok || local.GetType() != "SQLiteHybridRetriever" {
 			t.Fatalf("unexpected retriever implementation %#v", retriever)
 		}
 	}

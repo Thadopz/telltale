@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
-	"sort"
+	"github.com/Thadopz/telltale/internal/ai/documentpolicy"
+	"github.com/Thadopz/telltale/internal/ai/lexical"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/frame/g"
+	"github.com/google/uuid"
 )
 
 type knowledgeRow struct {
@@ -20,12 +22,89 @@ type knowledgeRow struct {
 	Vector   string `json:"vector"`
 }
 
-type durableMemoryRow struct {
-	MemoryID  int64  `json:"memory_id"`
-	UserID    string `json:"user_id"`
-	MemoryKey string `json:"memory_key"`
-	Vector    string `json:"vector"`
-	Status    string `json:"status"`
+func KnowledgeBySource(ctx context.Context, source string) ([]*schema.Document, error) {
+	var rows []knowledgeRow
+	if err := g.DB().Model("knowledge_documents").Ctx(ctx).Fields("id", "content", "metadata").Scan(&rows); err != nil {
+		return nil, err
+	}
+	var docs []*schema.Document
+	for _, row := range rows {
+		var metadata map[string]any
+		if err := json.Unmarshal([]byte(row.Metadata), &metadata); err != nil {
+			return nil, fmt.Errorf("decode knowledge metadata %s: %w", row.ID, err)
+		}
+		if metadata["_source"] == source {
+			docs = append(docs, &schema.Document{ID: row.ID, Content: row.Content, MetaData: metadata})
+		}
+	}
+	return docs, nil
+}
+
+// KnowledgeRevision also observes updates made by a separate CLI process.
+func KnowledgeRevision(ctx context.Context) (string, error) {
+	value, err := g.DB().Model("knowledge_index_revision").Ctx(ctx).Where("id", 1).Value("revision")
+	if err != nil {
+		return "", err
+	}
+	return value.String(), nil
+}
+
+// ReplaceKnowledgeSource performs no remote calls inside the transaction.
+func ReplaceKnowledgeSource(ctx context.Context, source string, ids, contents, metadata []string, vectors [][]float32) error {
+	if strings.TrimSpace(source) == "" || len(ids) != len(contents) || len(ids) != len(metadata) || len(ids) != len(vectors) {
+		return fmt.Errorf("invalid knowledge replacement")
+	}
+	data := make([]g.Map, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for index, id := range ids {
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(metadata[index]), &meta); err != nil {
+			return err
+		}
+		if meta["_source"] != source || id == "" || seen[id] || len(vectors[index]) == 0 {
+			return fmt.Errorf("invalid knowledge replacement document %q", id)
+		}
+		if _, err := documentpolicy.FromMetadata(meta); err != nil {
+			return err
+		}
+		seen[id] = true
+		if _, err := unitVector(vectors[index]); err != nil {
+			return fmt.Errorf("invalid knowledge vector %s: %w", id, err)
+		}
+		encoded, err := json.Marshal(vectors[index])
+		if err != nil {
+			return err
+		}
+		data[index] = g.Map{"id": id, "content": contents[index], "metadata": metadata[index], "vector": string(encoded), "lexical_text": lexical.Text(contents[index], meta)}
+	}
+	return g.DB().Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		var rows []knowledgeRow
+		if err := tx.Model("knowledge_documents").Ctx(ctx).Fields("id", "metadata").Scan(&rows); err != nil {
+			return err
+		}
+		for _, row := range rows {
+			var meta map[string]any
+			if err := json.Unmarshal([]byte(row.Metadata), &meta); err != nil {
+				return err
+			}
+			if meta["_source"] == source {
+				if _, err := tx.Model("knowledge_documents").Ctx(ctx).Where("id", row.ID).Delete(); err != nil {
+					return err
+				}
+			}
+		}
+		for _, item := range data {
+			item["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := tx.Model("knowledge_documents").Ctx(ctx).Data(item).Insert(); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Model("knowledge_index_revision").Ctx(ctx).Data(g.Map{"id": 1, "revision": ""}).InsertIgnore(); err != nil {
+			return err
+		}
+		_, err := tx.Model("knowledge_index_revision").Ctx(ctx).Where("id", 1).Data(g.Map{"revision": uuid.NewString()}).Update()
+		return err
+	})
 }
 
 // UpsertKnowledgeDocuments stores document content, metadata and its
@@ -35,26 +114,42 @@ func UpsertKnowledgeDocuments(ctx context.Context, ids []string, contents []stri
 	if len(ids) != len(contents) || len(ids) != len(metadata) || len(ids) != len(vectors) {
 		return fmt.Errorf("knowledge vector data length mismatch")
 	}
-	for index, id := range ids {
-		vectorJSON, err := json.Marshal(vectors[index])
-		if err != nil {
-			return fmt.Errorf("encode knowledge vector %s: %w", id, err)
+	return g.DB().Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
+		for index, id := range ids {
+			if strings.TrimSpace(id) == "" {
+				return fmt.Errorf("knowledge document id is empty")
+			}
+			if _, err := unitVector(vectors[index]); err != nil {
+				return fmt.Errorf("invalid knowledge vector %s: %w", id, err)
+			}
+			var meta map[string]any
+			if err := json.Unmarshal([]byte(metadata[index]), &meta); err != nil {
+				return err
+			}
+			if _, err := documentpolicy.FromMetadata(meta); err != nil {
+				return err
+			}
+			vectorJSON, err := json.Marshal(vectors[index])
+			if err != nil {
+				return fmt.Errorf("encode knowledge vector %s: %w", id, err)
+			}
+			data := g.Map{
+				"id":           id,
+				"content":      contents[index],
+				"metadata":     metadata[index],
+				"vector":       string(vectorJSON),
+				"lexical_text": lexical.Text(contents[index], meta),
+				"updated_at":   time.Now(),
+			}
+			if _, err = tx.Model("knowledge_documents").Ctx(ctx).Data(data).InsertIgnore(); err != nil {
+				return err
+			}
+			if _, err = tx.Model("knowledge_documents").Ctx(ctx).Where("id", id).Data(data).Update(); err != nil {
+				return err
+			}
 		}
-		data := g.Map{
-			"id":         id,
-			"content":    contents[index],
-			"metadata":   metadata[index],
-			"vector":     string(vectorJSON),
-			"updated_at": time.Now(),
-		}
-		if _, err = g.DB().Model("knowledge_documents").Ctx(ctx).Data(data).InsertIgnore(); err != nil {
-			return err
-		}
-		if _, err = g.DB().Model("knowledge_documents").Ctx(ctx).Where("id", id).Data(data).Update(); err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func DeleteKnowledgeBySource(ctx context.Context, source string) error {
@@ -62,141 +157,27 @@ func DeleteKnowledgeBySource(ctx context.Context, source string) error {
 	if source == "" {
 		return nil
 	}
-	var rows []knowledgeRow
-	if err := g.DB().Model("knowledge_documents").Ctx(ctx).Fields("id", "metadata").Scan(&rows); err != nil {
-		return err
-	}
-	for _, row := range rows {
-		var metadata map[string]any
-		if json.Unmarshal([]byte(row.Metadata), &metadata) != nil {
-			continue
-		}
-		if fmt.Sprint(metadata["_source"]) != source {
-			continue
-		}
-		if _, err := g.DB().Model("knowledge_documents").Ctx(ctx).Where("id", row.ID).Delete(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return ReplaceKnowledgeSource(ctx, source, nil, nil, nil, nil)
 }
 
 func SearchKnowledge(ctx context.Context, queryVector []float32, topK int) ([]*schema.Document, error) {
-	if len(queryVector) == 0 {
-		return nil, fmt.Errorf("knowledge query vector is empty")
-	}
 	if topK <= 0 {
 		topK = 12
 	}
-
-	var rows []knowledgeRow
-	if err := g.DB().Model("knowledge_documents").Ctx(ctx).Fields("id", "content", "metadata", "vector").Scan(&rows); err != nil {
+	rows, _, err := loadSearchSnapshot(ctx, "", topK)
+	if err != nil {
 		return nil, err
 	}
-
-	type scoredDocument struct {
-		document *schema.Document
-		score    float64
-	}
-	scored := make([]scoredDocument, 0, len(rows))
-	for _, row := range rows {
-		var vector []float32
-		if json.Unmarshal([]byte(row.Vector), &vector) != nil {
-			continue
-		}
-		score, ok := cosineSimilarity(queryVector, vector)
-		if !ok {
-			continue
-		}
-		metadata := make(map[string]any)
-		if strings.TrimSpace(row.Metadata) != "" {
-			if err := json.Unmarshal([]byte(row.Metadata), &metadata); err != nil {
-				metadata = make(map[string]any)
-			}
-		}
-		metadata["_retrieval"] = "sqlite_cosine"
-		metadata["_vector_score"] = score
-		scored = append(scored, scoredDocument{
-			document: (&schema.Document{ID: row.ID, Content: row.Content, MetaData: metadata}).WithScore(score),
-			score:    score,
-		})
-	}
-	sort.SliceStable(scored, func(left, right int) bool {
-		return scored[left].score > scored[right].score
-	})
-	if len(scored) > topK {
-		scored = scored[:topK]
+	scored, err := denseRanks(rows, queryVector, topK)
+	if err != nil {
+		return nil, err
 	}
 	documents := make([]*schema.Document, 0, len(scored))
 	for _, item := range scored {
-		documents = append(documents, item.document)
+		doc := cloneSearchDocument(item.doc)
+		doc.MetaData["_retrieval"] = "sqlite_cosine"
+		doc.MetaData["_vector_score"] = item.score
+		documents = append(documents, doc.WithScore(item.score))
 	}
 	return documents, nil
-}
-
-func UpsertDurableMemory(ctx context.Context, memoryID int64, userID string, memoryKey string, content string, vector []float32) error {
-	vectorJSON, err := json.Marshal(vector)
-	if err != nil {
-		return err
-	}
-	data := g.Map{
-		"memory_id":  memoryID,
-		"user_id":    strings.TrimSpace(userID),
-		"memory_key": strings.TrimSpace(memoryKey),
-		"content":    content,
-		"status":     "active",
-		"vector":     string(vectorJSON),
-		"updated_at": time.Now(),
-	}
-	if _, err = g.DB().Model("durable_memory_vectors").Ctx(ctx).Data(data).InsertIgnore(); err != nil {
-		return err
-	}
-	_, err = g.DB().Model("durable_memory_vectors").Ctx(ctx).Where("memory_id", memoryID).Data(data).Update()
-	return err
-}
-
-func DeleteDurableMemory(ctx context.Context, memoryID int64) error {
-	_, err := g.DB().Model("durable_memory_vectors").Ctx(ctx).Where("memory_id", memoryID).Delete()
-	return err
-}
-
-func SearchDurableMemory(ctx context.Context, userID string, memoryKey string, queryVector []float32) (float64, bool, error) {
-	var rows []durableMemoryRow
-	err := g.DB().Model("durable_memory_vectors").Ctx(ctx).
-		Fields("memory_id", "user_id", "memory_key", "status", "vector").
-		Where("user_id", strings.TrimSpace(userID)).
-		Where("memory_key", strings.TrimSpace(memoryKey)).
-		Where("status", "active").
-		Scan(&rows)
-	if err != nil {
-		return 0, false, err
-	}
-	for _, row := range rows {
-		var vector []float32
-		if json.Unmarshal([]byte(row.Vector), &vector) != nil {
-			continue
-		}
-		if score, ok := cosineSimilarity(queryVector, vector); ok {
-			return score, true, nil
-		}
-	}
-	return 0, false, nil
-}
-
-func cosineSimilarity(left []float32, right []float32) (float64, bool) {
-	if len(left) == 0 || len(left) != len(right) {
-		return 0, false
-	}
-	var dotProduct, leftLength, rightLength float64
-	for index := range left {
-		leftValue := float64(left[index])
-		rightValue := float64(right[index])
-		dotProduct += leftValue * rightValue
-		leftLength += leftValue * leftValue
-		rightLength += rightValue * rightValue
-	}
-	if leftLength == 0 || rightLength == 0 {
-		return 0, false
-	}
-	return dotProduct / (math.Sqrt(leftLength) * math.Sqrt(rightLength)), true
 }

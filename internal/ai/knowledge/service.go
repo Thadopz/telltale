@@ -1,11 +1,13 @@
 package knowledge
 
 import (
-	knowledgeRetriever "github.com/Thadopz/telltale/internal/ai/retriever"
-	"github.com/Thadopz/telltale/internal/authz"
-	"github.com/Thadopz/telltale/internal/observability"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/documentpolicy"
+	knowledgeRetriever "github.com/Thadopz/telltale/internal/ai/retriever"
+	"github.com/Thadopz/telltale/internal/ai/vectorstore"
+	"github.com/Thadopz/telltale/internal/authz"
+	"github.com/Thadopz/telltale/internal/observability"
 	"strings"
 	"sync"
 	"time"
@@ -21,13 +23,22 @@ const defaultCacheTTL = 2 * time.Minute
 const defaultCacheMaxEntries = 256
 
 type SearchRequest struct {
+	Policy     documentpolicy.Options
 	SessionID  string
 	Query      string
 	Retriever  retriever.Retriever
 	SkipRerank bool
 }
 
+type disableRerankKey struct{}
+
+// WithRerankDisabled applies to every knowledge search within this request.
+func WithRerankDisabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, disableRerankKey{}, true)
+}
+
 type SearchResult struct {
+	ValidUntil      time.Time
 	Documents       []*schema.Document
 	NormalizedQuery string
 	CandidateCount  int
@@ -59,6 +70,14 @@ func DefaultService() *Service {
 }
 
 func (s *Service) Search(ctx context.Context, request SearchRequest) (result SearchResult, err error) {
+	filter, err := request.Policy.Resolve(time.Now())
+	if err != nil {
+		return result, err
+	}
+	ctx = documentpolicy.WithFilter(ctx, filter)
+	if disabled, _ := ctx.Value(disableRerankKey{}).(bool); disabled {
+		request.SkipRerank = true
+	}
 	result.NormalizedQuery = NormalizeQuery(request.Query)
 	if result.NormalizedQuery == "" {
 		return result, fmt.Errorf("knowledge query is empty")
@@ -66,7 +85,7 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (result Sea
 
 	startedAt := time.Now()
 	ctx, span := observability.StartSpan(ctx, "knowledge.retrieve",
-		attribute.String("retrieval.strategy", "dense_bm25_rrf_rerank"),
+		attribute.String("retrieval.strategy", "bm25_dense_rrf_rerank"),
 	)
 	defer func() {
 		observability.RecordRetrieval(ctx, time.Since(startedAt), err, result.CandidateCount, len(result.Documents))
@@ -78,6 +97,19 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (result Sea
 	}()
 
 	cacheKey := buildCacheKey(cacheSessionScope(ctx, request.SessionID), result.NormalizedQuery)
+	if cacheKey != "" {
+		cacheKey += filter.CacheKey()
+	}
+	if cacheKey != "" && request.SkipRerank {
+		cacheKey += "\x00skip-rerank"
+	}
+	if request.Retriever == nil && cacheKey != "" {
+		revision, revisionErr := vectorstore.KnowledgeRevision(ctx)
+		if revisionErr != nil {
+			return result, revisionErr
+		}
+		cacheKey += "\x00" + revision
+	}
 	if cached, ok := s.cachedResult(cacheKey, time.Now()); ok {
 		cached.FromCache = true
 		result = cached
@@ -97,7 +129,35 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (result Sea
 		return result, err
 	}
 	result.CandidateCount = len(documents)
+	var eligible []*schema.Document
+	for _, doc := range documents {
+		if doc == nil {
+			continue
+		}
+		record, policyErr := documentpolicy.FromMetadata(doc.MetaData)
+		if policyErr != nil {
+			return result, policyErr
+		}
+		if filter.Mode == "current" && filter.AsOf == "" {
+			next := record.NextChange(filter.At)
+			if !next.IsZero() && (result.ValidUntil.IsZero() || next.Before(result.ValidUntil)) {
+				result.ValidUntil = next
+			}
+		}
+		if record.Allows(filter) {
+			copy := cloneDocuments([]*schema.Document{doc})[0]
+			copy.MetaData = documentpolicy.Annotate(copy.MetaData, record, filter)
+			eligible = append(eligible, copy)
+		}
+	}
+	documents = eligible
 	result.Documents = documents
+	if request.Retriever == nil && cacheKey != "" && filter.Mode == "current" && filter.AsOf == "" {
+		result.ValidUntil, err = vectorstore.NextDocumentPolicyChange(ctx, filter.At)
+		if err != nil {
+			return result, err
+		}
+	}
 
 	if !request.SkipRerank && len(documents) > 0 {
 		reranked, rerankErr := Rerank(ctx, request.Query, documents)
@@ -161,6 +221,11 @@ func (s *Service) storeResult(ctx context.Context, key string, result SearchResu
 	s.cache[key] = cacheEntry{
 		result:    cloneResult(result),
 		expiresAt: now.Add(cacheTTL(ctx)),
+	}
+	if !result.ValidUntil.IsZero() && result.ValidUntil.Before(s.cache[key].expiresAt) {
+		entry := s.cache[key]
+		entry.expiresAt = result.ValidUntil
+		s.cache[key] = entry
 	}
 }
 
