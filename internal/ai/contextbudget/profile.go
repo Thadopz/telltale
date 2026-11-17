@@ -53,17 +53,20 @@ type PromptBudget struct {
 // BudgetReport is safe to attach to context and traces because it contains
 // only aggregate sizes, never prompt content.
 type BudgetReport struct {
-	EstimatedTokens      int      `json:"estimated_tokens,omitempty"`
-	EffectiveEstimated   int      `json:"effective_estimated_tokens,omitempty"`
-	FinalBudgetTokens    int      `json:"final_budget_tokens,omitempty"`
-	InputLimitTokens     int      `json:"input_limit_tokens,omitempty"`
-	OutputReserveTokens  int      `json:"output_reserve_tokens,omitempty"`
-	PromptOverheadTokens int      `json:"prompt_overhead_tokens,omitempty"`
-	SafetyMarginTokens   int      `json:"safety_margin_tokens,omitempty"`
-	CalibrationFactor    float64  `json:"calibration_factor,omitempty"`
-	TrimmedLayers        []string `json:"trimmed_layers,omitempty"`
-	ModelName            string   `json:"model_name,omitempty"`
-	ContextWindowTokens  int      `json:"context_window_tokens,omitempty"`
+	ToolReserveTokens     int      `json:"tool_reserve_tokens,omitzero"`
+	ToolOutputTokens      int      `json:"tool_output_tokens,omitzero"`
+	KnowledgeTargetTokens int      `json:"knowledge_target_tokens,omitzero"`
+	EstimatedTokens       int      `json:"estimated_tokens,omitempty"`
+	EffectiveEstimated    int      `json:"effective_estimated_tokens,omitempty"`
+	FinalBudgetTokens     int      `json:"final_budget_tokens,omitempty"`
+	InputLimitTokens      int      `json:"input_limit_tokens,omitempty"`
+	OutputReserveTokens   int      `json:"output_reserve_tokens,omitempty"`
+	PromptOverheadTokens  int      `json:"prompt_overhead_tokens,omitempty"`
+	SafetyMarginTokens    int      `json:"safety_margin_tokens,omitempty"`
+	CalibrationFactor     float64  `json:"calibration_factor,omitempty"`
+	TrimmedLayers         []string `json:"trimmed_layers,omitempty"`
+	ModelName             string   `json:"model_name,omitempty"`
+	ContextWindowTokens   int      `json:"context_window_tokens,omitempty"`
 }
 
 type budgetReportKey struct{}

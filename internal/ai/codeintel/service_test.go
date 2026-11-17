@@ -282,7 +282,7 @@ func codeReaderContext() context.Context {
 		TenantID: "tenant-a",
 		Roles:    []string{"code_reader"},
 	})
-	ctx = authz.WithAgentScope(ctx, authz.AgentScopePayment)
+	ctx = authz.WithAgentScope(ctx, authz.AgentScopeObservability)
 	return context.WithValue(ctx, "client_id", "conversation-a")
 }
 

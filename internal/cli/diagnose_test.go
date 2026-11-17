@@ -37,7 +37,7 @@ func TestRunDiagnoseWithServiceHumanOutputIsAnswerOnly(t *testing.T) {
 		ConversationID: "incident-1",
 		EvidenceIDs:    []string{"ev-1"},
 		TraceSummary: diagnosis.TraceSummary{
-			ToolCalls: []diagnosis.ToolCallSummary{{ToolName: "payment_agent", Summary: "bounded summary"}},
+			ToolCalls: []diagnosis.ToolCallSummary{{ToolName: "observability_agent", Summary: "bounded summary"}},
 		},
 	}}
 	var output bytes.Buffer

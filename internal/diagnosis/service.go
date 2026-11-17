@@ -16,10 +16,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
 
-	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline"
+	chatanswer "github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/answer"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/diagnostic"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/execution"
 	"github.com/Thadopz/telltale/internal/ai/agent/trace"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"github.com/Thadopz/telltale/internal/ai/input_preprocessor"
+	"github.com/Thadopz/telltale/internal/ai/runstate"
 	"github.com/Thadopz/telltale/internal/ai/sqlobserve"
 	aitools "github.com/Thadopz/telltale/internal/ai/tools"
 	"github.com/Thadopz/telltale/internal/appconfig"
@@ -80,15 +83,15 @@ type IncidentDiagnoseRequest struct {
 // DiagnoseResult contains structured, bounded output for a completed run.
 // Full tool payloads and prompts are deliberately not exposed here.
 type DiagnoseResult struct {
-	Answer          string                     `json:"answer"`
-	RunID           string                     `json:"run_id"`
-	ConversationID  string                     `json:"conversation_id"`
-	ClaimSet        evidence.ClaimSet          `json:"claim_set"`
-	CoverageReports []evidence.CoverageReport  `json:"coverage_reports,omitempty"`
-	Hypotheses      []chat_pipeline.Hypothesis `json:"hypotheses,omitempty"`
-	EvidenceIDs     []string                   `json:"evidence_ids,omitempty"`
-	FailedQueryIDs  []string                   `json:"failed_query_ids,omitempty"`
-	TraceSummary    TraceSummary               `json:"trace_summary"`
+	Answer          string                    `json:"answer"`
+	RunID           string                    `json:"run_id"`
+	ConversationID  string                    `json:"conversation_id"`
+	ClaimSet        evidence.ClaimSet         `json:"claim_set"`
+	CoverageReports []evidence.CoverageReport `json:"coverage_reports,omitempty"`
+	Hypotheses      []diagnostic.Hypothesis   `json:"hypotheses,omitempty"`
+	EvidenceIDs     []string                  `json:"evidence_ids,omitempty"`
+	FailedQueryIDs  []string                  `json:"failed_query_ids,omitempty"`
+	TraceSummary    TraceSummary              `json:"trace_summary"`
 }
 
 type TraceSummary struct {
@@ -148,13 +151,13 @@ func (s *service) DiagnoseIncident(ctx context.Context, request IncidentDiagnose
 	return s.diagnoseWithState(ctx, DiagnoseRequest{
 		Question:       question,
 		ConversationID: "watch-" + request.JobID,
-	}, func(question string) chat_pipeline.DiagnosticState {
-		state := chat_pipeline.BuildDiagnosticStateForIncident(question, request.Domain, request.DatabaseProbe)
+	}, func(question string) diagnostic.DiagnosticState {
+		state := diagnostic.BuildDiagnosticStateForIncident(question, request.Domain, request.DatabaseProbe)
 		state.ExpectedStartTime = request.ObservedAt.Add(-time.Duration(request.WindowMinutes) * time.Minute).UTC().Format(time.RFC3339)
 		state.ExpectedEndTime = request.ObservedAt.UTC().Format(time.RFC3339)
 		state.ExpectedDatabaseTarget = request.DatabaseTarget
 		return state
-	}, func(ctx context.Context) (compose.Runnable[*chat_pipeline.UserMessage, *schema.Message], error) {
+	}, func(ctx context.Context) (compose.Runnable[*execution.UserMessage, *schema.Message], error) {
 		allowedDomains := []aitools.Domain{aitools.DomainObservability}
 		allowedTools := map[aitools.Domain][]string(nil)
 		agentScope := authz.AgentScopeObservability
@@ -163,7 +166,7 @@ func (s *service) DiagnoseIncident(ctx context.Context, request IncidentDiagnose
 			allowedTools = map[aitools.Domain][]string{aitools.DomainDatabase: {"db_slow_queries"}}
 			agentScope = authz.AgentScopeCoordinator
 		}
-		return chat_pipeline.BuildChatAgentWithOptions(ctx, chat_pipeline.ChatAgentOptions{
+		return execution.BuildChatAgentWithOptions(ctx, execution.ChatAgentOptions{
 			AgentScope:        agentScope,
 			MaxIterations:     incidentDiagnosisMaxIterations,
 			DisableToolSearch: true,
@@ -173,10 +176,7 @@ func (s *service) DiagnoseIncident(ctx context.Context, request IncidentDiagnose
 	}, true)
 }
 
-func incidentAgentScope(domain string) authz.AgentScope {
-	if domain == "payment" {
-		return authz.AgentScopePayment
-	}
+func incidentAgentScope(_ string) authz.AgentScope {
 	return authz.AgentScopeObservability
 }
 
@@ -271,7 +271,7 @@ type preparedTurn struct {
 	ConversationID               string
 	Question                     string
 	Memory                       *mem.SimpleMemory
-	UserMessage                  *chat_pipeline.UserMessage
+	UserMessage                  *execution.UserMessage
 	AllowClaimExtractionFallback bool
 }
 
@@ -280,20 +280,20 @@ func (s *service) Diagnose(ctx context.Context, request DiagnoseRequest) (Diagno
 	if err != nil {
 		return DiagnoseResult{}, err
 	}
-	buildRunner := chat_pipeline.BuildChatAgent
+	buildRunner := execution.BuildChatAgent
 	if mode == "raw_unenforced" {
-		buildRunner = func(ctx context.Context) (compose.Runnable[*chat_pipeline.UserMessage, *schema.Message], error) {
-			return chat_pipeline.BuildChatAgentWithOptions(ctx, chat_pipeline.ChatAgentOptions{EvalEvidenceMode: mode})
+		buildRunner = func(ctx context.Context) (compose.Runnable[*execution.UserMessage, *schema.Message], error) {
+			return execution.BuildChatAgentWithOptions(ctx, execution.ChatAgentOptions{EvalEvidenceMode: mode})
 		}
 	}
-	return s.diagnoseWithState(ctx, request, chat_pipeline.BuildDiagnosticState, buildRunner, false)
+	return s.diagnoseWithState(ctx, request, diagnostic.BuildDiagnosticState, buildRunner, false)
 }
 
 func (s *service) diagnoseWithState(
 	ctx context.Context,
 	request DiagnoseRequest,
-	buildState func(string) chat_pipeline.DiagnosticState,
-	buildRunner func(context.Context) (compose.Runnable[*chat_pipeline.UserMessage, *schema.Message], error),
+	buildState func(string) diagnostic.DiagnosticState,
+	buildRunner func(context.Context) (compose.Runnable[*execution.UserMessage, *schema.Message], error),
 	allowClaimExtractionFallback bool,
 ) (DiagnoseResult, error) {
 	turn, err := prepareTurn(ctx, request)
@@ -310,7 +310,7 @@ func (s *service) diagnoseWithState(
 	callbackHandlers := defaultCallbacks(turn, recorder)
 	state := buildState(turn.Question)
 	turn.AllowClaimExtractionFallback = allowClaimExtractionFallback
-	out, state, err := chat_pipeline.RunDiagnosticLoopWithPreparedState(
+	out, state, err := diagnostic.RunDiagnosticLoopWithPreparedState(
 		turn.Context,
 		runner,
 		turn.UserMessage,
@@ -335,11 +335,11 @@ func (s *service) DiagnoseStream(ctx context.Context, request DiagnoseRequest, s
 	if err != nil {
 		return DiagnoseResult{}, err
 	}
-	var runner compose.Runnable[*chat_pipeline.UserMessage, *schema.Message]
+	var runner compose.Runnable[*execution.UserMessage, *schema.Message]
 	if mode == "raw_unenforced" {
-		runner, err = chat_pipeline.BuildChatAgentWithOptions(turn.Context, chat_pipeline.ChatAgentOptions{EvalEvidenceMode: mode})
+		runner, err = execution.BuildChatAgentWithOptions(turn.Context, execution.ChatAgentOptions{EvalEvidenceMode: mode})
 	} else {
-		runner, err = chat_pipeline.BuildChatAgent(turn.Context)
+		runner, err = execution.BuildChatAgent(turn.Context)
 	}
 	if err != nil {
 		return DiagnoseResult{}, fmt.Errorf("build chat agent: %w", err)
@@ -351,8 +351,9 @@ func (s *service) DiagnoseStream(ctx context.Context, request DiagnoseRequest, s
 		return DiagnoseResult{}, err
 	}
 
-	state := chat_pipeline.BuildDiagnosticState(turn.Question)
-	diagnosticTurn := chat_pipeline.PrepareDiagnosticTurn(turn.UserMessage, state)
+	state := diagnostic.BuildDiagnosticState(turn.Question)
+	diagnostic.SyncDiagnosticHypotheses(turn.Context, &state)
+	diagnosticTurn := diagnostic.PrepareDiagnosticTurn(turn.UserMessage, state)
 	callbackHandlers := []callbacks.Handler{
 		trace.StreamingCallback("chat_stream_agent", recorder, func(event string, step trace.AgentStep) {
 			data, marshalErr := json.Marshal(step)
@@ -380,9 +381,10 @@ func (s *service) DiagnoseStream(ctx context.Context, request DiagnoseRequest, s
 		chunk, receiveErr := stream.Recv()
 		if errors.Is(receiveErr, io.EOF) {
 			originalResponse := fullResponse.String()
-			chat_pipeline.UpdateDiagnosticState(&state, recorder.ToolEvidence())
-			if chat_pipeline.NeedsDiagnosticFollowUp(state) {
-				followUpTurn := chat_pipeline.PrepareDiagnosticFollowUp(turn.UserMessage, &state, recorder.ToolEvidence())
+			diagnostic.UpdateDiagnosticState(&state, recorder.ToolEvidence())
+			diagnostic.SyncDiagnosticHypotheses(turn.Context, &state)
+			if !runstate.Completed(turn.Context) && diagnostic.NeedsDiagnosticFollowUp(state) {
+				followUpTurn := diagnostic.PrepareDiagnosticFollowUp(turn.UserMessage, &state, recorder.ToolEvidence())
 				followUp, followUpErr := runner.Invoke(turn.Context, followUpTurn, callbackOptions)
 				if followUpErr != nil {
 					g.Log().Warningf(turn.Context, "diagnostic follow-up failed; keep first answer: %v", followUpErr)
@@ -449,11 +451,16 @@ func defaultCallbacks(turn *preparedTurn, recorder *trace.Recorder) []callbacks.
 }
 
 func prepareTurn(ctx context.Context, request DiagnoseRequest) (*preparedTurn, error) {
+	ctx = runstate.WithState(ctx)
 	request, err := validateDiagnoseRequest(request)
 	if err != nil {
 		return nil, err
 	}
 	question := request.Question
+	ctx = runstate.WithQuestion(ctx, question)
+	if g.Cfg().MustGet(ctx, "agent.diagnostic_hypotheses", true).Bool() {
+		runstate.EnableDiagnostic(ctx)
+	}
 
 	principal := authz.ConfiguredPrincipal(ctx)
 	if strings.TrimSpace(principal.UserID) == "" {
@@ -478,6 +485,9 @@ func prepareTurn(ctx context.Context, request DiagnoseRequest) (*preparedTurn, e
 	if err != nil {
 		return nil, fmt.Errorf("load chat context: %w", err)
 	}
+	if err := memory.Compact(ctx, layers.SessionState); err != nil {
+		return nil, fmt.Errorf("compact chat context: %w", err)
+	}
 
 	return &preparedTurn{
 		Context:        ctx,
@@ -485,12 +495,12 @@ func prepareTurn(ctx context.Context, request DiagnoseRequest) (*preparedTurn, e
 		ConversationID: conversationID,
 		Question:       question,
 		Memory:         memory,
-		UserMessage: &chat_pipeline.UserMessage{
+		UserMessage: &execution.UserMessage{
 			ID:             conversationID,
 			UserID:         principal.UserID,
 			ConversationID: conversationID,
 			Query:          question,
-			History:        memory.GetContextMessages(chat_pipeline.DynamicContextPolicy(ctx)),
+			History:        memory.GetContextMessages(execution.DynamicContextPolicy(ctx)),
 			Summary:        memory.GetContextSummary(mem.ContextSummaryMaxChars),
 			SessionState:   layers.SessionState,
 			DurableMemory:  layers.DurableMemory,
@@ -534,30 +544,41 @@ func validateDiagnoseRequest(request DiagnoseRequest) (DiagnoseRequest, error) {
 	}, nil
 }
 
-func finishTurn(ctx context.Context, turn *preparedTurn, answer *schema.Message, state chat_pipeline.DiagnosticState, recorder *trace.Recorder) (DiagnoseResult, error) {
+func finishTurn(ctx context.Context, turn *preparedTurn, answer *schema.Message, state diagnostic.DiagnosticState, recorder *trace.Recorder) (DiagnoseResult, error) {
 	if answer == nil {
 		return DiagnoseResult{}, fmt.Errorf("diagnostic loop returned no answer")
 	}
 	return finishTurnWithAnswer(ctx, turn, answer.Content, state, recorder)
 }
 
-func finishTurnWithAnswer(ctx context.Context, turn *preparedTurn, draftAnswer string, state chat_pipeline.DiagnosticState, recorder *trace.Recorder) (DiagnoseResult, error) {
+func finishTurnWithAnswer(ctx context.Context, turn *preparedTurn, draftAnswer string, state diagnostic.DiagnosticState, recorder *trace.Recorder) (DiagnoseResult, error) {
+	diagnostic.SyncDiagnosticHypotheses(ctx, &state)
+	if runstate.Completed(ctx) {
+		pipelineResult := &chatanswer.ClaimPipelineResult{
+			ClaimSet:   evidence.ClaimSet{SchemaVersion: evidence.ClaimSchemaVersion},
+			Hypotheses: state.Hypotheses,
+		}
+		if err := saveCompletedTurn(ctx, turn, runstate.CompletionMessage, pipelineResult); err != nil {
+			return DiagnoseResult{}, err
+		}
+		return buildResult(ctx, turn, runstate.CompletionMessage, state, recorder, pipelineResult), nil
+	}
 	evidenceMode, err := appconfig.EvaluationEvidenceMode(ctx)
 	if err != nil {
 		return DiagnoseResult{}, err
 	}
 	if evidenceMode == "visible_unenforced" || evidenceMode == "raw_unenforced" {
-		pipelineResult := &chat_pipeline.ClaimPipelineResult{}
+		pipelineResult := &chatanswer.ClaimPipelineResult{}
 		if err := saveCompletedTurn(ctx, turn, draftAnswer, pipelineResult); err != nil {
 			return DiagnoseResult{}, err
 		}
 		return buildResult(ctx, turn, draftAnswer, state, recorder, pipelineResult), nil
 	}
-	pipelineResult := &chat_pipeline.ClaimPipelineResult{}
-	answer, err := chat_pipeline.ConvergeAnswer(ctx, chat_pipeline.AnswerConvergeInput{
+	pipelineResult := &chatanswer.ClaimPipelineResult{}
+	answer, err := chatanswer.ConvergeAnswer(ctx, chatanswer.AnswerConvergeInput{
 		Question:                turn.Question,
 		Answer:                  draftAnswer,
-		Mode:                    chat_pipeline.ResponseModeDiagnostic,
+		Mode:                    chatanswer.ResponseModeDiagnostic,
 		DiagnosticState:         &state,
 		Steps:                   recorder.Steps(),
 		ToolEvidence:            recorder.ToolEvidence(),
@@ -576,17 +597,29 @@ func finishTurnWithAnswer(ctx context.Context, turn *preparedTurn, draftAnswer s
 	return buildResult(ctx, turn, answer, state, recorder, pipelineResult), nil
 }
 
-func saveCompletedTurn(ctx context.Context, turn *preparedTurn, answer string, pipelineResult *chat_pipeline.ClaimPipelineResult) error {
+func saveCompletedTurn(ctx context.Context, turn *preparedTurn, answer string, pipelineResult *chatanswer.ClaimPipelineResult) error {
 	turn.Memory.SetMessages(schema.UserMessage(turn.Question))
 	turn.Memory.SetMessages(schema.AssistantMessage(answer, nil))
 	if pipelineResult != nil {
-		turn.Memory.AddContextFacts(contextFactsFromPipeline(pipelineResult))
+		retainedResult := *pipelineResult
+		if runstate.DiagnosticAblation(ctx) == "no_retention" {
+			retainedResult.Hypotheses = nil
+		}
+		turn.Memory.AddContextFacts(contextFactsFromPipeline(&retainedResult))
 	}
 
 	principal := authz.ConfiguredPrincipal(ctx)
 	memoryPrincipal := mem.MemoryPrincipal{TenantID: principal.TenantID, UserID: turn.UserID}
 	storageConversationID := mem.TenantConversationID(memoryPrincipal, turn.ConversationID)
-	if err := mem.UpdateSessionState(ctx, turn.UserID, storageConversationID, turn.Question, answer); err != nil {
+	diagnosticSnapshot := ""
+	if snapshot := runstate.DiagnosticSnapshot(ctx); snapshot != nil && runstate.DiagnosticAblation(ctx) != "no_retention" {
+		encoded, err := json.Marshal(snapshot)
+		if err != nil {
+			return err
+		}
+		diagnosticSnapshot = string(encoded)
+	}
+	if err := mem.UpdateSessionState(ctx, turn.UserID, storageConversationID, turn.Question, answer, diagnosticSnapshot); err != nil {
 		return fmt.Errorf("update chat session state: %w", err)
 	}
 	memoryConfig := mem.ConfiguredMemory(ctx)
@@ -604,15 +637,10 @@ func saveCompletedTurn(ctx context.Context, turn *preparedTurn, answer string, p
 			}
 		}
 	}
-	if memoryConfig.Mode != mem.MemoryModeActive {
-		if err := mem.ExtractAndSaveDurableMemories(ctx, turn.UserID, turn.ConversationID, turn.Question, answer); err != nil {
-			g.Log().Warningf(ctx, "legacy durable memory extraction failed user_id=%s conversation_id=%s err=%v", turn.UserID, turn.ConversationID, err)
-		}
-	}
 	return nil
 }
 
-func contextFactsFromPipeline(result *chat_pipeline.ClaimPipelineResult) []mem.ContextFact {
+func contextFactsFromPipeline(result *chatanswer.ClaimPipelineResult) []mem.ContextFact {
 	if result == nil {
 		return nil
 	}
@@ -640,6 +668,10 @@ func contextFactsFromPipeline(result *chat_pipeline.ClaimPipelineResult) []mem.C
 		}
 	}
 	for _, hypothesis := range result.Hypotheses {
+		if len(hypothesis.RetainedFacts) > 0 {
+			encoded, _ := json.Marshal(hypothesis)
+			facts = append(facts, mem.ContextFact{Kind: "hypothesis_state", Value: string(encoded), SourceRole: "diagnostic_state"})
+		}
 		facts = append(facts,
 			mem.ContextFact{Kind: "hypothesis_id", Value: hypothesis.ID, SourceRole: "diagnostic_state"},
 			mem.ContextFact{Kind: "hypothesis_status", Value: hypothesis.ID + "=" + string(hypothesis.Status), SourceRole: "diagnostic_state"},
@@ -647,16 +679,28 @@ func contextFactsFromPipeline(result *chat_pipeline.ClaimPipelineResult) []mem.C
 		for _, evidenceID := range hypothesis.EvidenceIDs {
 			facts = append(facts, mem.ContextFact{Kind: "evidence_id", Value: evidenceID, SourceRole: "diagnostic_state"})
 		}
+		for _, ref := range hypothesis.LogReferences {
+			facts = append(facts, mem.ContextFact{Kind: "log_reference", Value: ref, SourceRole: "diagnostic_state"})
+		}
+		for _, window := range hypothesis.LogWindows {
+			facts = append(facts, mem.ContextFact{Kind: "log_window_state", Value: window, SourceRole: "diagnostic_state"})
+		}
+		for _, gap := range hypothesis.CoverageGaps {
+			facts = append(facts, mem.ContextFact{Kind: "coverage_gap", Value: gap, SourceRole: "diagnostic_state"})
+		}
+		for _, check := range hypothesis.CompletedLogChecks {
+			facts = append(facts, mem.ContextFact{Kind: "completed_log_check", Value: check, SourceRole: "diagnostic_state"})
+		}
 	}
 	return facts
 }
 
-func buildResult(ctx context.Context, turn *preparedTurn, answer string, state chat_pipeline.DiagnosticState, recorder *trace.Recorder, pipelineResult *chat_pipeline.ClaimPipelineResult) DiagnoseResult {
+func buildResult(ctx context.Context, turn *preparedTurn, answer string, state diagnostic.DiagnosticState, recorder *trace.Recorder, pipelineResult *chatanswer.ClaimPipelineResult) DiagnoseResult {
 	result := DiagnoseResult{
 		Answer:         answer,
 		RunID:          evidence.RunIDFromContext(ctx),
 		ConversationID: turn.ConversationID,
-		Hypotheses:     append([]chat_pipeline.Hypothesis(nil), state.Hypotheses...),
+		Hypotheses:     append([]diagnostic.Hypothesis(nil), state.Hypotheses...),
 		TraceSummary:   summarizeTrace(recorder),
 	}
 	if pipelineResult != nil {

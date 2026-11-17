@@ -1,9 +1,9 @@
 package skills
 
 import (
-	"github.com/Thadopz/telltale/internal/authz"
 	"context"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/authz"
 	"os"
 	"path/filepath"
 	"sort"
@@ -242,8 +242,6 @@ func skillAllowedForSelection(skill Skill, selection SelectionContext) bool {
 
 func domainForScope(scope authz.AgentScope) string {
 	switch scope {
-	case authz.AgentScopePayment:
-		return "payment"
 	case authz.AgentScopeObservability:
 		return "observability"
 	case authz.AgentScopeDatabase:

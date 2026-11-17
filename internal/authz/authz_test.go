@@ -100,47 +100,47 @@ func TestAgentScopeIsRequiredForScopedToolCalls(t *testing.T) {
 		Permission:         PermCodeRead,
 		Risk:               RiskReadOnly,
 		AgentScope:         AgentScopeDatabase,
-		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+		AllowedAgentScopes: []AgentScope{AgentScopeObservability},
 	})
 	if decision.Allowed || decision.Reason != "agent scope is not allowed" {
 		t.Fatalf("expected wrong agent scope to be denied, got %#v", decision)
 	}
 
-	allowedContext := WithAgentScope(ctx, AgentScopePayment)
-	allowedContext = WithAgentCapability(allowedContext, NewAgentCapabilityWithCapabilities(AgentScopePayment, time.Minute, "code.read"))
+	allowedContext := WithAgentScope(ctx, AgentScopeObservability)
+	allowedContext = WithAgentCapability(allowedContext, NewAgentCapabilityWithCapabilities(AgentScopeObservability, time.Minute, "code.read"))
 	allowed := NewAuthorizer().Authorize(allowedContext, ToolCall{
 		Name:               "code_search",
 		Permission:         PermCodeRead,
 		Risk:               RiskReadOnly,
-		AgentScope:         AgentScopePayment,
-		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+		AgentScope:         AgentScopeObservability,
+		AllowedAgentScopes: []AgentScope{AgentScopeObservability},
 		RequiredCapability: "code.read",
 	})
 	if !allowed.Allowed {
-		t.Fatalf("expected payment agent scope to be allowed, got %#v", allowed)
+		t.Fatalf("expected observability agent scope to be allowed, got %#v", allowed)
 	}
 }
 
 func TestAgentCapabilityCannotBeReplacedByScopeOnly(t *testing.T) {
-	ctx := WithAgentScope(context.Background(), AgentScopePayment)
-	ctx = WithAgentCapability(ctx, NewAgentCapabilityWithCapabilities(AgentScopePayment, time.Minute, "payment.diagnose"))
+	ctx := WithAgentScope(context.Background(), AgentScopeObservability)
+	ctx = WithAgentCapability(ctx, NewAgentCapabilityWithCapabilities(AgentScopeObservability, time.Minute, "observability.diagnose"))
 	decision := NewAuthorizer().Authorize(ctx, ToolCall{
 		Name:               "code_search",
 		Permission:         PermCodeRead,
 		Risk:               RiskReadOnly,
-		AgentScope:         AgentScopePayment,
-		AllowedAgentScopes: []AgentScope{AgentScopePayment},
+		AgentScope:         AgentScopeObservability,
+		AllowedAgentScopes: []AgentScope{AgentScopeObservability},
 		RequiredCapability: "code.read",
 	})
 	if decision.Allowed {
-		t.Fatal("expected payment capability without code.read to be denied")
+		t.Fatal("expected diagnostic capability without code.read to be denied")
 	}
 }
 
 func TestAgentScopeContextNormalizesValues(t *testing.T) {
-	ctx := WithAgentScope(context.Background(), " PAYMENT_AGENT ")
-	if got := AgentScopeFromContext(ctx); got != AgentScopePayment {
-		t.Fatalf("expected normalized payment scope, got %q", got)
+	ctx := WithAgentScope(context.Background(), " OBSERVABILITY_AGENT ")
+	if got := AgentScopeFromContext(ctx); got != AgentScopeObservability {
+		t.Fatalf("expected normalized observability scope, got %q", got)
 	}
 }
 

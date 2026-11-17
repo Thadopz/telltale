@@ -54,7 +54,7 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, "  code search               search the controlled code snapshot")
 	fmt.Fprintln(output, "  watch [--once]            run anomaly watcher")
 	fmt.Fprintln(output, "  incident list|show        inspect watcher incidents and diagnoses")
-	fmt.Fprintln(output, "  knowledge index|recall    manage local knowledge")
+	fmt.Fprintln(output, "  knowledge index|recall|annotate    manage local knowledge")
 	fmt.Fprintln(output, "  memory flush             flush a conversation memory buffer")
 	fmt.Fprintln(output, "Global option: --config-dir PATH")
 }

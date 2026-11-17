@@ -1,12 +1,12 @@
 package main
 
 import (
-	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline"
+	"context"
+	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/execution"
 	"github.com/Thadopz/telltale/internal/appconfig"
 	"github.com/Thadopz/telltale/utility/mem"
 	"github.com/Thadopz/telltale/utility/storage"
-	"context"
-	"fmt"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -21,12 +21,12 @@ func main() {
 		panic(err)
 	}
 	id := "111"
-	userMessage := &chat_pipeline.UserMessage{
+	userMessage := &execution.UserMessage{
 		ID:      id,
 		Query:   "你好",
 		History: mem.GetSimpleMemory(id).GetMessages(),
 	}
-	runner, err := chat_pipeline.BuildChatAgent(ctx)
+	runner, err := execution.BuildChatAgent(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -41,7 +41,7 @@ func main() {
 	mem.GetSimpleMemory(id).SetMessages(schema.UserMessage("你好"))
 	mem.GetSimpleMemory(id).SetMessages(schema.SystemMessage(out.Content))
 	// 第二次对话
-	userMessage = &chat_pipeline.UserMessage{
+	userMessage = &execution.UserMessage{
 		ID:      id,
 		Query:   "现在是几点",
 		History: mem.GetSimpleMemory(id).GetMessages(),

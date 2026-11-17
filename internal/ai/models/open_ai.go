@@ -20,7 +20,7 @@ func OpenAIForDeepSeekV31Think(ctx context.Context) (cm model.ToolCallingChatMod
 	if err != nil {
 		return nil, err
 	}
-	return wrapProviderCacheModel(ctx, cm, config.Model)
+	return wrapProviderCacheModel(ctx, WithRequestBudget(cm, contextbudget.ConfiguredProfile(ctx, "think_chat_model")), config.Model)
 }
 
 func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatModel, err error) {
@@ -32,7 +32,7 @@ func OpenAIForDeepSeekV3Quick(ctx context.Context) (cm model.ToolCallingChatMode
 	if err != nil {
 		return nil, err
 	}
-	return wrapProviderCacheModel(ctx, cm, config.Model)
+	return wrapProviderCacheModel(ctx, WithRequestBudget(cm, contextbudget.ConfiguredProfile(ctx, "quick_chat_model")), config.Model)
 }
 
 func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) {
@@ -45,7 +45,7 @@ func OpenAIForFailover(ctx context.Context) (model.ToolCallingChatModel, error) 
 	if err != nil {
 		return nil, fmt.Errorf("create failover chat model: %w", err)
 	}
-	return wrapProviderCacheModel(ctx, chatModel, config.Model)
+	return wrapProviderCacheModel(ctx, WithRequestBudget(chatModel, contextbudget.ConfiguredProfile(ctx, "failover_chat_model")), config.Model)
 }
 
 func configuredOpenAIChatModel(ctx context.Context, configKey string) (*openai.ChatModelConfig, error) {

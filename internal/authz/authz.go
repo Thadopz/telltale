@@ -36,7 +36,6 @@ type AgentScope string
 
 const (
 	AgentScopeCoordinator   AgentScope = "coordinator"
-	AgentScopePayment       AgentScope = "payment_agent"
 	AgentScopeObservability AgentScope = "observability_agent"
 	AgentScopeDatabase      AgentScope = "database_agent"
 	AgentScopeKnowledge     AgentScope = "knowledge_agent"

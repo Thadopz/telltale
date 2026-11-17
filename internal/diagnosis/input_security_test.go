@@ -65,7 +65,7 @@ func TestIncidentAgentScopeUsesTrustedDomain(t *testing.T) {
 	if got := incidentAgentScope("observability"); got != authz.AgentScopeObservability {
 		t.Fatalf("unexpected observability scope: %s", got)
 	}
-	if got := incidentAgentScope("payment"); got != authz.AgentScopePayment {
+	if got := incidentAgentScope("payment"); got != authz.AgentScopeObservability {
 		t.Fatalf("unexpected payment scope: %s", got)
 	}
 }

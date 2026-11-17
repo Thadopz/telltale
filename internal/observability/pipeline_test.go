@@ -18,8 +18,8 @@ func TestAgentMetricsAreExported(t *testing.T) {
 	defer provider.Shutdown(context.Background())
 
 	ctx := context.Background()
-	RecordAgentRun(ctx, "payment_agent", "payment", "domain", false, 25*time.Millisecond, nil)
-	RecordAgentRoute(ctx, "payment_agent", "payment", errors.New("route failed"))
+	RecordAgentRun(ctx, "observability_agent", "observability", "domain", false, 25*time.Millisecond, nil)
+	RecordAgentRoute(ctx, "observability_agent", "observability", errors.New("route failed"))
 	RecordWatchRule(ctx, "payment-success-rate", "payment", "payment_metric", "opened", nil)
 	RecordWatchCycle(ctx, 30*time.Millisecond, 3, nil)
 	RecordWatchDiagnosisJob(ctx, "claimed", "observability", "card-service", 10*time.Millisecond, nil)

@@ -46,6 +46,9 @@ type AgentStep struct {
 	TotalTokens           int       `json:"total_tokens,omitempty"`
 	InputBudgetTokens     int       `json:"input_budget_tokens,omitempty"`
 	FinalBudgetTokens     int       `json:"final_budget_tokens,omitempty"`
+	ToolReserveTokens     int       `json:"tool_reserve_tokens,omitzero"`
+	ToolOutputTokens      int       `json:"tool_output_tokens,omitzero"`
+	KnowledgeTargetTokens int       `json:"knowledge_target_tokens,omitzero"`
 	ContextWindowTokens   int       `json:"context_window_tokens,omitempty"`
 	PromptOverheadTokens  int       `json:"prompt_overhead_tokens,omitempty"`
 	SafetyMarginTokens    int       `json:"safety_margin_tokens,omitempty"`
@@ -254,6 +257,9 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	builder := callbacks.NewHandlerBuilder()
 
 	builder.OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		if info == nil {
+			return ctx
+		}
 		ctx = startComponentSpan(ctx, info)
 		recordToolInput(info, input, recorder)
 		step := AgentStep{
@@ -274,6 +280,9 @@ func Callback(agent string, recorder *Recorder) callbacks.Handler {
 	})
 
 	builder.OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+		if info == nil {
+			return ctx
+		}
 		recordToolOutput(info, output, recorder)
 		promptTokens, cachedTokens, uncachedTokens, completionTokens, totalTokens := modelTokenUsage(info, output)
 		cacheTrace := aimodels.ProviderCacheTraceFromContext(ctx)
@@ -514,6 +523,9 @@ func applyBudgetReport(ctx context.Context, step *AgentStep, estimated int, mode
 	if report, ok := contextbudget.BudgetReportFromContext(ctx); ok {
 		step.InputBudgetTokens = report.InputLimitTokens
 		step.FinalBudgetTokens = report.FinalBudgetTokens
+		step.ToolReserveTokens = report.ToolReserveTokens
+		step.ToolOutputTokens = report.ToolOutputTokens
+		step.KnowledgeTargetTokens = report.KnowledgeTargetTokens
 		step.ContextWindowTokens = report.ContextWindowTokens
 		step.PromptOverheadTokens = report.PromptOverheadTokens
 		step.SafetyMarginTokens = report.SafetyMarginTokens

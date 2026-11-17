@@ -1,8 +1,8 @@
 package skills
 
 import (
-	"github.com/Thadopz/telltale/internal/authz"
 	"context"
+	"github.com/Thadopz/telltale/internal/authz"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,11 +132,11 @@ func TestSelectForUsesExplicitScopeDomainAndCapabilityBeforeQueryRanking(t *test
 	writeSkill(t, filepath.Join(dir, "payment", "SKILL.md"), `---
 name: payment-diagnostics
 description: Generic incident procedure.
-domain: payment
+domain: observability
 agent_scopes:
-  - payment_agent
+  - observability_agent
 capabilities:
-  - payment.diagnose
+  - observability.diagnose
 ---
 
 Payment evidence procedure.
@@ -159,9 +159,9 @@ Database evidence procedure.
 		MaxSelected:  2,
 		MaxBodyChars: 100,
 	}, "database payment callback", SelectionContext{
-		AgentScope:   authz.AgentScopePayment,
-		Domain:       "payment",
-		Capabilities: []string{"payment.diagnose"},
+		AgentScope:   authz.AgentScopeObservability,
+		Domain:       "observability",
+		Capabilities: []string{"observability.diagnose"},
 	})
 	if err != nil {
 		t.Fatalf("select scoped skills: %v", err)
@@ -185,8 +185,8 @@ Generic procedure.
 		Dirs:        []string{dir},
 		MaxSelected: 2,
 	}, "payment callback", SelectionContext{
-		AgentScope: authz.AgentScopePayment,
-		Domain:     "payment",
+		AgentScope: authz.AgentScopeObservability,
+		Domain:     "observability",
 	})
 	if err != nil {
 		t.Fatalf("select scoped skills: %v", err)
