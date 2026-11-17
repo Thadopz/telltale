@@ -4,7 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline"
+	chatanswer "github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/answer"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/execution"
 	"github.com/Thadopz/telltale/internal/ai/agent/trace"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"github.com/Thadopz/telltale/internal/authz"
@@ -240,7 +241,7 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 	payloads := &payloadRecorder{}
 	agentOptions := optionsForCase(preparedCase, opts, stressModel, pressureModel, payloads)
 	recorder := trace.NewRecorder()
-	runner, err := chat_pipeline.BuildChatAgentWithOptions(ctx, agentOptions)
+	runner, err := execution.BuildChatAgentWithOptions(ctx, agentOptions)
 	if err != nil {
 		result.Error = err.Error()
 		finishResult(&result, recorder, startedAt)
@@ -263,9 +264,9 @@ func RunCase(ctx context.Context, evalCase Case, opts RunOptions, attempt int) (
 	result.DraftAnswer = result.Answer
 	finishResult(&result, recorder, startedAt)
 	if shouldRunStructuredClaimPipeline(preparedCase, opts) {
-		pipelineResult := &chat_pipeline.ClaimPipelineResult{}
+		pipelineResult := &chatanswer.ClaimPipelineResult{}
 		claimExtractor := structuredClaimExtractorForCase(preparedCase, opts)
-		finalAnswer, convergeErr := chat_pipeline.ConvergeAnswer(ctx, chat_pipeline.AnswerConvergeInput{
+		finalAnswer, convergeErr := chatanswer.ConvergeAnswer(ctx, chatanswer.AnswerConvergeInput{
 			Question:       preparedCase.Query,
 			Answer:         result.DraftAnswer,
 			Steps:          result.TraceSteps,
@@ -339,15 +340,15 @@ func shouldRunStructuredClaimPipeline(evalCase Case, opts RunOptions) bool {
 	return opts.RealModel && opts.Mode == ModeContextStress
 }
 
-func structuredClaimExtractorForCase(evalCase Case, opts RunOptions) chat_pipeline.ClaimExtractor {
+func structuredClaimExtractorForCase(evalCase Case, opts RunOptions) chatanswer.ClaimExtractor {
 	if opts.RealModel || evalCase.Claims == nil {
 		return nil
 	}
 	return fixtureClaimExtractor{claimSet: *evalCase.Claims}
 }
 
-func buildUserMessage(evalCase Case, conversationID string) *chat_pipeline.UserMessage {
-	return &chat_pipeline.UserMessage{
+func buildUserMessage(evalCase Case, conversationID string) *execution.UserMessage {
+	return &execution.UserMessage{
 		ID:             conversationID,
 		UserID:         "eval",
 		ConversationID: conversationID,
@@ -360,7 +361,7 @@ func buildUserMessage(evalCase Case, conversationID string) *chat_pipeline.UserM
 	}
 }
 
-func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressModel, pressureModel *queryResultPressureModel, payloads *payloadRecorder) chat_pipeline.ChatAgentOptions {
+func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressModel, pressureModel *queryResultPressureModel, payloads *payloadRecorder) execution.ChatAgentOptions {
 	switch opts.Mode {
 	case ModeContract:
 		noRetries := 0
@@ -368,7 +369,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 		if len(evalCase.FailoverModelSteps) > 0 {
 			failoverModel = newScriptedModel(evalCase.FailoverModelSteps)
 		}
-		return chat_pipeline.ChatAgentOptions{
+		return execution.ChatAgentOptions{
 			ChatModel:     newScriptedModel(evalCase.ModelSteps),
 			FailoverModel: failoverModel,
 			Tools:         fixtureTools(evalCase.ToolFixtures),
@@ -376,7 +377,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 			ModelRetries:  &noRetries,
 		}
 	case ModeRouting:
-		return chat_pipeline.ChatAgentOptions{
+		return execution.ChatAgentOptions{
 			Tools:         fixtureTools(evalCase.ToolFixtures),
 			MaxIterations: 8,
 		}
@@ -384,7 +385,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 		noRetries := 0
 		spec := normalizeContextStressSpec(evalCase.ContextStress)
 		profile := contextStressProfile(spec, opts.ContextStressVariant)
-		options := chat_pipeline.ChatAgentOptions{
+		options := execution.ChatAgentOptions{
 			Tools:                  fixtureTools(evalCase.ToolFixtures),
 			MaxIterations:          6,
 			ModelRetries:           &noRetries,
@@ -398,7 +399,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 		return options
 	case ModeQueryResultPressure:
 		noRetries := 0
-		options := chat_pipeline.ChatAgentOptions{
+		options := execution.ChatAgentOptions{
 			Tools:             fixtureTools(evalCase.ToolFixtures),
 			MaxIterations:     4,
 			ModelRetries:      &noRetries,
@@ -411,7 +412,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 		return options
 	case ModeEvidenceAblation:
 		noRetries := 0
-		options := chat_pipeline.ChatAgentOptions{
+		options := execution.ChatAgentOptions{
 			Tools:             fixtureToolsForMode(evalCase.ToolFixtures, opts.EvidenceMode, payloads),
 			MaxIterations:     8,
 			ModelRetries:      &noRetries,
@@ -425,7 +426,7 @@ func optionsForCase(evalCase Case, opts RunOptions, stressModel *contextStressMo
 		}
 		return options
 	default:
-		return chat_pipeline.ChatAgentOptions{}
+		return execution.ChatAgentOptions{}
 	}
 }
 
@@ -569,7 +570,7 @@ func resultToolFixtures(evalCase Case, spec ContextStressSpec) []ToolFixture {
 
 func usedKnowledgeTool(calls []ToolEvidence) bool {
 	for _, call := range calls {
-		if call.Name == "knowledge_agent" || call.Name == "query_internal_docs" {
+		if call.Name == "mechanism_agent" || call.Name == "knowledge_agent" || call.Name == "query_internal_docs" {
 			return true
 		}
 	}

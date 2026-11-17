@@ -45,7 +45,7 @@ func TestContextStressModelRejectsMissingFactBeforeToolCall(t *testing.T) {
 func TestContextStressModelChecksFactsAcrossToolLoop(t *testing.T) {
 	facts := []string{"ERR_PAYMENT_CALLBACK_TIMEOUT", "/api/v1/payment/callback"}
 	model := newContextStressModel(facts, "payment callback")
-	if _, err := model.WithTools([]*schema.ToolInfo{{Name: "payment_agent"}}); err != nil {
+	if _, err := model.WithTools([]*schema.ToolInfo{{Name: "observability_agent"}}); err != nil {
 		t.Fatalf("attach target tool: %v", err)
 	}
 	messages := []*schema.Message{
@@ -56,13 +56,13 @@ func TestContextStressModelChecksFactsAcrossToolLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first model call: %v", err)
 	}
-	if len(first.ToolCalls) != 1 || first.ToolCalls[0].Function.Name != "payment_agent" {
-		t.Fatalf("expected payment_agent tool call, got %#v", first.ToolCalls)
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].Function.Name != "observability_agent" {
+		t.Fatalf("expected observability_agent tool call, got %#v", first.ToolCalls)
 	}
 
 	secondMessages := append(messages, &schema.Message{
 		Role:     schema.Tool,
-		ToolName: "payment_agent",
+		ToolName: "observability_agent",
 		Content:  "payment evidence returned",
 	})
 	second, err := model.Generate(context.Background(), secondMessages)

@@ -3,7 +3,9 @@ package eval
 import (
 	"fmt"
 	"github.com/Thadopz/telltale/internal/ai/contextbudget"
+	"slices"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -223,7 +225,7 @@ func contextStressToolResults(existing string, targetChars int, facts []string) 
 func contextStressToolFixtures(distractorCount int) []ToolFixture {
 	fixtures := make([]ToolFixture, 0, distractorCount+1)
 	fixtures = append(fixtures, ToolFixture{
-		Name:        "payment_agent",
+		Name:        "observability_agent",
 		Description: "Inspect payment and order runtime evidence for callback failures, impact scope, and associated evidence identifiers.",
 		Parameters: map[string]ToolParameterFixture{
 			"query": {
@@ -285,7 +287,7 @@ func contextStressToolMarkerHits(fixtures []ToolFixture) []string {
 		for _, value := range values {
 			lowerValue := strings.ToLower(value)
 			for _, marker := range contextStressForbiddenMarkers {
-				if strings.Contains(lowerValue, marker) {
+				if slices.Contains(strings.FieldsFunc(lowerValue, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }), marker) {
 					hits = appendUniqueStrings(hits, fixture.Name+":"+marker)
 				}
 			}
@@ -297,7 +299,7 @@ func contextStressToolMarkerHits(fixtures []ToolFixture) []string {
 func contextStressDistractorNames(fixtures []ToolFixture) map[string]bool {
 	names := make(map[string]bool)
 	for _, fixture := range fixtures {
-		if fixture.Name != "payment_agent" {
+		if fixture.Name != "observability_agent" {
 			names[fixture.Name] = true
 		}
 	}

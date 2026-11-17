@@ -155,8 +155,8 @@ func TestRunContextStressCaseExecutesBothVariants(t *testing.T) {
 			}},
 		},
 		Expected: Expected{
-			RequiredAgents:    []string{"payment_agent"},
-			ArgumentContains:  map[string][]string{"payment_agent": {"payment callback"}},
+			RequiredAgents:    []string{"observability_agent"},
+			ArgumentContains:  map[string][]string{"observability_agent": {"payment callback"}},
 			RequireEvidenceID: true,
 			MaxToolCalls:      1,
 			MaxModelCalls:     4,
@@ -212,7 +212,7 @@ func TestScoreCaseChecksAgentArgumentsAndCallBudgets(t *testing.T) {
 			ToolCalls:  1,
 		},
 		ToolCalls: []ToolEvidence{{
-			Name:       "payment_agent",
+			Name:       "observability_agent",
 			Input:      `{"query":"check PAY-123 callback"}`,
 			Output:     `{"success":true,"evidence_id":"ev_payment","message":"callback timeout"}`,
 			Status:     "success",
@@ -220,9 +220,9 @@ func TestScoreCaseChecksAgentArgumentsAndCallBudgets(t *testing.T) {
 		}},
 	}
 	evalCase := Case{Expected: Expected{
-		RequiredAgents:    []string{"payment_agent"},
+		RequiredAgents:    []string{"observability_agent"},
 		ForbiddenAgents:   []string{"knowledge_agent"},
-		ArgumentContains:  map[string][]string{"payment_agent": {"PAY-123"}},
+		ArgumentContains:  map[string][]string{"observability_agent": {"PAY-123"}},
 		AnswerContains:    []string{"timeout"},
 		EvidenceContains:  []string{"callback timeout"},
 		RequireEvidenceID: true,

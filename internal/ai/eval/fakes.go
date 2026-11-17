@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline"
+	"github.com/Thadopz/telltale/internal/ai/agent/chat_pipeline/answer"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"strings"
 	"sync"
@@ -66,7 +66,7 @@ type fixtureClaimExtractor struct {
 	claimSet evidence.ClaimSet
 }
 
-func (extractor fixtureClaimExtractor) Extract(context.Context, chat_pipeline.ClaimExtractionInput) (evidence.ClaimSet, error) {
+func (extractor fixtureClaimExtractor) Extract(context.Context, answer.ClaimExtractionInput) (evidence.ClaimSet, error) {
 	return extractor.claimSet, nil
 }
 
@@ -198,7 +198,7 @@ func (m *contextStressModel) Generate(_ context.Context, messages []*schema.Mess
 		m.querySeen = true
 	}
 	for _, message := range messages {
-		if message != nil && message.Role == schema.Tool && message.ToolName == "payment_agent" {
+		if message != nil && message.Role == schema.Tool && message.ToolName == "observability_agent" {
 			m.toolResultSeen = true
 		}
 	}
@@ -215,7 +215,7 @@ func (m *contextStressModel) Generate(_ context.Context, messages []*schema.Mess
 			ID:   fmt.Sprintf("context_stress_tool_%d", m.calls),
 			Type: "function",
 			Function: schema.FunctionCall{
-				Name:      "payment_agent",
+				Name:      "observability_agent",
 				Arguments: string(arguments),
 			},
 		}}), nil

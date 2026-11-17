@@ -32,6 +32,7 @@ evaluation:
   evidence_mode: "full"
 
 agent:
+  diagnostic_hypotheses: true
   invoke_model_retries: 1
   failover:
     enabled: false
@@ -128,6 +129,7 @@ failover_chat_model:
   max_output_tokens: 8192
 
 embedding_model:
+  max_input_tokens: 2048 # Set to the actual provider input limit; indexing uses UTF-8 bytes as a conservative bound.
   description: "multimodal embedding model for knowledge retrieval"
   api_key: "YOUR_EMBEDDING_API_KEY"
   base_url: "YOUR_EMBEDDING_API_BASE_URL"
@@ -139,11 +141,11 @@ rerank:
   top_n: 3
   observe_log: true
 
-durable_memory:
-  enabled: true
-  extraction_timeout_seconds: 8
-  min_confidence: 0.8
-  duplicate_similarity: 0.90
+knowledge_index:
+  contextual_enabled: true
+
+knowledge_compression:
+  strategy: baseline # task: question-aware original paragraph selection; generic: evaluation ablation
 
 # Profile/Event memory is introduced in shadow mode so extraction quality and
 # cost can be measured before it is allowed to affect model context.
@@ -220,6 +222,15 @@ code:
     handle_uses: 3
 
 tools:
+  logs:
+    default_source: "diagnostic_logs"
+    sources:
+      diagnostic_logs:
+        url: "http://127.0.0.1:8000"
+        response_format: "goframe"
+        permission: "tool:payment.read"
+        services:
+          payment: "tool:payment.read"
   call_timeout_seconds: 30
   mcp_registration_timeout_seconds: 30
   mcp_servers: []
