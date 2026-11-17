@@ -41,10 +41,13 @@ type PaymentOrderDetailInput struct {
 }
 
 type SearchPaymentLogsInput struct {
-	OrderID string `json:"order_id,omitempty" jsonschema:"description=Payment order number to filter diagnostic logs"`
-	Level   string `json:"level,omitempty" jsonschema:"description=Log level such as INFO, WARN, or ERROR. Empty defaults to recent ERROR logs when no other filter is provided"`
-	Keyword string `json:"keyword,omitempty" jsonschema:"description=Keyword to search in log message or error message"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"description=Maximum logs to return"`
+	StartTime string `json:"start_time,omitempty" jsonschema:"description=Optional RFC3339 inclusive start; requires end_time; new backend required"`
+	EndTime   string `json:"end_time,omitempty" jsonschema:"description=Optional RFC3339 exclusive end; at most one hour"`
+	Operation string `json:"operation,omitempty" jsonschema:"description=Optional exact operation filter; new backend required"`
+	OrderID   string `json:"order_id,omitempty" jsonschema:"description=Payment order number to filter diagnostic logs"`
+	Level     string `json:"level,omitempty" jsonschema:"description=Log level such as INFO, WARN, or ERROR. Empty defaults to recent ERROR logs when no other filter is provided"`
+	Keyword   string `json:"keyword,omitempty" jsonschema:"description=Keyword to search in log message or error message"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"description=Maximum logs to return"`
 }
 
 type QueryPaymentStatusDistributionInput struct {
@@ -125,12 +128,30 @@ func NewSearchPaymentLogsTool() (tool.InvokableTool, error) {
 		func(ctx context.Context, input *SearchPaymentLogsInput, opts ...tool.Option) (string, error) {
 			values := url.Values{}
 			if input != nil {
+				if input.StartTime != "" || input.EndTime != "" {
+					if err := validateLogWindow(&AnalyzeLogWindowInput{Service: "payment", Start: input.StartTime, End: input.EndTime, Operation: input.Operation}); err != nil {
+						return marshalToolError(err, "invalid log window"), nil
+					}
+					addQuery(values, "startTime", input.StartTime)
+					addQuery(values, "endTime", input.EndTime)
+				}
+				addQuery(values, "operation", input.Operation)
 				addQuery(values, "orderId", input.OrderID)
 				addQuery(values, "level", input.Level)
 				addQuery(values, "keyword", input.Keyword)
 				addPositiveIntQuery(values, "limit", input.Limit)
 			}
-			return callPaymentAgent(ctx, "/api/v1/agent/search_error_logs", values, "payment diagnostic logs query completed", paymentLogObservations(input))
+			output, err := callPaymentAgent(ctx, "/api/v1/agent/search_error_logs", values, "payment diagnostic logs query completed", paymentLogObservations(input))
+			if err == nil && input != nil && (input.StartTime != "" || input.EndTime != "" || input.Operation != "") {
+				env := evidence.Parse(output).Envelope
+				payload, _ := env.Data.(map[string]any)
+				data, _ := payload["data"].(map[string]any)
+				scope, _ := data["applied_scope"].(map[string]any)
+				if scope == nil || scope["start_time"] != input.StartTime || scope["end_time"] != input.EndTime || scope["operation"] != input.Operation {
+					return marshalToolError(nil, "backend cannot verify requested log scope; upgrade backend or report capability gap"), nil
+				}
+			}
+			return output, err
 		})
 }
 
@@ -162,12 +183,16 @@ func callPaymentAgent(ctx context.Context, path string, values url.Values, messa
 		return marshalToolError(err, "call payment agent failed"), nil
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	const maxPaymentResponseBytes = 2 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPaymentResponseBytes+1))
 	if err != nil {
 		return marshalToolError(err, "read payment agent response failed"), nil
 	}
+	if len(body) > maxPaymentResponseBytes {
+		return marshalToolError(nil, "payment agent response exceeds byte budget; use aggregation or narrower scope"), nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return marshalToolError(fmt.Errorf("payment agent http %d: %s", resp.StatusCode, string(body)), "payment agent returned non-success status"), nil
+		return marshalToolError(fmt.Errorf("payment agent http %d", resp.StatusCode), "payment agent returned non-success status"), nil
 	}
 
 	var payload any
@@ -275,7 +300,6 @@ func paymentLogObservations(input *SearchPaymentLogsInput) paymentObservationBui
 			setAny(fields, "level", input.Level)
 			setAny(fields, "error_code", input.Keyword)
 			subject.OrderNo = strings.TrimSpace(input.OrderID)
-			subject.TraceID = strings.TrimSpace(input.Keyword)
 		}
 		return []evidence.Observation{{
 			Kind:    kind,

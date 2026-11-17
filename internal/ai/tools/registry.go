@@ -22,11 +22,10 @@ const (
 	DomainGeneral       Domain = "general"
 	DomainObservability Domain = "observability"
 	DomainDatabase      Domain = "database"
-	DomainPayment       Domain = "payment"
 	DomainKnowledge     Domain = "knowledge"
 )
 
-// DomainToolSet keeps tools in stable business boundaries. Callers can expose
+// DomainToolSet keeps tools in stable functional boundaries. Callers can expose
 // each set through a dedicated agent without teaching the registry about agent
 // orchestration.
 type DomainToolSet struct {
@@ -105,6 +104,20 @@ func (r *Registry) buildChatDomainTools(ctx context.Context) ([]DomainToolSet, e
 	}
 
 	var observabilityTools []tool.BaseTool
+	for _, factory := range []func() (tool.InvokableTool, error){
+		NewAnalyzeLogWindowTool,
+		NewReadLogEvidenceTool,
+		NewDiscoverTelemetryTool,
+		NewDiscoverMetricsTool,
+		NewQueryMetricsTool,
+		NewSearchLogsTool,
+		NewSearchTracesTool,
+		NewReadEvidenceTool,
+	} {
+		if err = appendTool(authz.WithAgentScope(ctx, authz.AgentScopeObservability), &observabilityTools, factory); err != nil {
+			return nil, err
+		}
+	}
 	if err = appendSREGymLocalTools(ctx, &observabilityTools); err != nil {
 		return nil, err
 	}
@@ -112,6 +125,12 @@ func (r *Registry) buildChatDomainTools(ctx context.Context) ([]DomainToolSet, e
 		return nil, err
 	}
 	observabilityTools = appendUniqueTools(ctx, observabilityTools, configuredTools[DomainObservability])
+	if err = appendPaymentObservabilityTools(ctx, &observabilityTools); err != nil {
+		return nil, err
+	}
+	if err = r.appendCodeTools(ctx, &observabilityTools); err != nil {
+		return nil, err
+	}
 
 	var databaseTools []tool.BaseTool
 	if err = appendTool(ctx, &databaseTools, NewMysqlCrudTool); err != nil {
@@ -131,15 +150,6 @@ func (r *Registry) buildChatDomainTools(ctx context.Context) ([]DomainToolSet, e
 	}
 	databaseTools = appendUniqueTools(ctx, databaseTools, configuredTools[DomainDatabase])
 
-	var paymentTools []tool.BaseTool
-	if err = appendPaymentAgentTools(ctx, &paymentTools); err != nil {
-		return nil, err
-	}
-	if err = r.appendCodeTools(ctx, &paymentTools); err != nil {
-		return nil, err
-	}
-	paymentTools = appendUniqueTools(ctx, paymentTools, configuredTools[DomainPayment])
-
 	var generalTools []tool.BaseTool
 	if err = appendTool(ctx, &generalTools, NewGetCurrentTimeTool); err != nil {
 		return nil, err
@@ -155,7 +165,6 @@ func (r *Registry) buildChatDomainTools(ctx context.Context) ([]DomainToolSet, e
 		{Domain: DomainGeneral, Tools: generalTools},
 		{Domain: DomainObservability, Tools: observabilityTools},
 		{Domain: DomainDatabase, Tools: databaseTools},
-		{Domain: DomainPayment, Tools: paymentTools},
 		{Domain: DomainKnowledge, Tools: knowledgeTools},
 	}, nil
 }
@@ -236,8 +245,6 @@ func domainForAgentScope(scope authz.AgentScope) (Domain, bool) {
 		return DomainObservability, true
 	case authz.AgentScopeDatabase:
 		return DomainDatabase, true
-	case authz.AgentScopePayment:
-		return DomainPayment, true
 	case authz.AgentScopeKnowledge:
 		return DomainKnowledge, true
 	default:
@@ -258,8 +265,8 @@ func (r *Registry) appendCodeTools(ctx context.Context, toolList *[]tool.BaseToo
 		return nil
 	}
 
-	registrationCtx := authz.WithAgentScope(ctx, authz.AgentScopePayment)
-	registrationCtx = authz.WithAgentCapability(registrationCtx, authz.NewAgentCapabilityWithCapabilities(authz.AgentScopePayment, 10*time.Minute, "payment.diagnose", "code.read"))
+	registrationCtx := authz.WithAgentScope(ctx, authz.AgentScopeObservability)
+	registrationCtx = authz.WithAgentCapability(registrationCtx, authz.NewAgentCapabilityWithCapabilities(authz.AgentScopeObservability, 10*time.Minute, "observability.diagnose", "code.read"))
 	factories := []func() (tool.InvokableTool, error){
 		func() (tool.InvokableTool, error) { return NewCodeSearchTool(service) },
 		func() (tool.InvokableTool, error) { return NewCodeReadTool(service) },
@@ -298,7 +305,8 @@ func appendTool(ctx context.Context, toolList *[]tool.BaseTool, factory func() (
 	return nil
 }
 
-func appendPaymentAgentTools(ctx context.Context, toolList *[]tool.BaseTool) error {
+func appendPaymentObservabilityTools(ctx context.Context, toolList *[]tool.BaseTool) error {
+	ctx = authz.WithAgentScope(ctx, authz.AgentScopeObservability)
 	for _, factory := range []func() (tool.InvokableTool, error){
 		NewQueryPaymentAnomalyTool,
 		NewQueryPaymentMetricsTool,

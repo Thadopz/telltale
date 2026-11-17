@@ -59,7 +59,7 @@ func TestLoadConfiguredMCPServersGroupsAndNamespacesTools(t *testing.T) {
 		},
 		{
 			Name:       "payment-platform",
-			Domain:     DomainPayment,
+			Domain:     DomainObservability,
 			URL:        "http://payment.example/mcp",
 			Permission: authz.PermPaymentRead,
 			Enabled:    true,
@@ -78,13 +78,13 @@ func TestLoadConfiguredMCPServersGroupsAndNamespacesTools(t *testing.T) {
 	if !observabilityNames["observability_platform__find_incidents"] {
 		t.Fatalf("unexpected observability tools: %#v", observabilityNames)
 	}
-	paymentNames := toolNames(t, ctx, toolsByDomain[DomainPayment])
+	paymentNames := toolNames(t, ctx, toolsByDomain[DomainObservability])
 	if !paymentNames["payment_platform__find_incidents"] {
 		t.Fatalf("unexpected payment tools: %#v", paymentNames)
 	}
 
-	invokable := toolsByDomain[DomainPayment][0].(tool.InvokableTool)
-	paymentCtx := mcpAgentContext(ctx, authz.AgentScopePayment)
+	invokable := toolsByDomain[DomainObservability][1].(tool.InvokableTool)
+	paymentCtx := mcpAgentContext(ctx, authz.AgentScopeObservability)
 	output, err := invokable.InvokableRun(paymentCtx, `{"order_id":"P-1"}`)
 	if err != nil {
 		t.Fatalf("invoke configured MCP tool: %v", err)
@@ -286,7 +286,7 @@ func TestMCPHeadersFromEnv(t *testing.T) {
 func TestMCPServerConfigScansSnakeCaseFields(t *testing.T) {
 	raw := gvar.New([]map[string]any{{
 		"name":             "payment",
-		"domain":           "payment",
+		"domain":           "observability",
 		"url":              "http://payment.example/mcp",
 		"permission":       "tool:payment.read",
 		"enabled":          true,

@@ -1,0 +1,39 @@
+# 将 telemetry 合并到实际配置的 tools 下；这个示例不会自动启用。
+# 引用密钥从环境变量 TELLTALE_TELEMETRY_KEY 读取：base64 编码的随机 32 字节。
+# 多实例共享同一个密钥；不得使用示例常量。
+tools:
+  telemetry:
+    sources:
+      metrics_prod:
+        kind: prometheus
+        url: http://127.0.0.1:9090
+        tenant: your-application-tenant
+        environment: production
+        service_label: service
+        instance_label: instance
+        environment_label: environment
+        services:
+          inventory: tool:metrics.read
+      logs_prod:
+        kind: loki
+        url: http://127.0.0.1:3100
+        tenant: your-application-tenant
+        backend_tenant: your-loki-tenant
+        environment: production
+        service_label: service_name
+        instance_label: service_instance_id
+        environment_label: deployment_environment
+        # bearer_env: LOKI_READ_BEARER
+        services:
+          inventory: tool:logs.read
+      traces_prod:
+        kind: tempo
+        url: http://127.0.0.1:3200
+        tenant: your-application-tenant
+        backend_tenant: your-tempo-tenant
+        environment: production
+        # permission 允许读取该来源的完整跨服务链路，应配置独立角色授权。
+        permission: tool:traces.source.read
+        # bearer_env: TEMPO_READ_BEARER
+        services:
+          inventory: tool:logs.read

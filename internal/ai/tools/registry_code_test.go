@@ -13,7 +13,7 @@ import (
 	"github.com/Thadopz/telltale/internal/authz"
 )
 
-func TestRegistryOnlyExposesCodeToolsToPaymentAgent(t *testing.T) {
+func TestRegistryOnlyExposesCodeToolsToObservabilityAgent(t *testing.T) {
 	service := testCodeService(t)
 	ctx := authz.WithPrincipal(context.Background(), authz.Principal{
 		UserID:   "reader",
@@ -22,13 +22,13 @@ func TestRegistryOnlyExposesCodeToolsToPaymentAgent(t *testing.T) {
 	})
 	registry := NewRegistryWithCodeService(service)
 
-	paymentTools, err := registry.ToolsForAgent(ctx, ScenarioChat, authz.AgentScopePayment)
+	observabilityTools, err := registry.ToolsForAgent(ctx, ScenarioChat, authz.AgentScopeObservability)
 	if err != nil {
-		t.Fatalf("load payment agent tools: %v", err)
+		t.Fatalf("load observability agent tools: %v", err)
 	}
-	paymentNames := toolNames(t, ctx, paymentTools)
-	if !paymentNames["code_search"] || !paymentNames["code_read"] {
-		t.Fatalf("expected payment agent code tools, got %#v", paymentNames)
+	observabilityNames := toolNames(t, ctx, observabilityTools)
+	if !observabilityNames["code_search"] || !observabilityNames["code_read"] {
+		t.Fatalf("expected observability agent code tools, got %#v", observabilityNames)
 	}
 	legacyTools, err := registry.ToolsFor(ctx, ScenarioChat)
 	if err != nil {
@@ -41,7 +41,6 @@ func TestRegistryOnlyExposesCodeToolsToPaymentAgent(t *testing.T) {
 
 	for _, scope := range []authz.AgentScope{
 		authz.AgentScopeCoordinator,
-		authz.AgentScopeObservability,
 		authz.AgentScopeDatabase,
 		authz.AgentScopeKnowledge,
 	} {
@@ -78,8 +77,8 @@ func TestCodeToolRuntimeAuthorizationRejectsWrongAgentScope(t *testing.T) {
 		t.Fatalf("expected scope denial, got %s", out)
 	}
 
-	ctx = authz.WithAgentScope(ctx, authz.AgentScopePayment)
-	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapabilityWithCapabilities(authz.AgentScopePayment, time.Minute, "code.read"))
+	ctx = authz.WithAgentScope(ctx, authz.AgentScopeObservability)
+	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapabilityWithCapabilities(authz.AgentScopeObservability, time.Minute, "code.read"))
 	out, err = wrapped.InvokableRun(ctx, `{"query":"OpenPool","mode":"symbol"}`)
 	if err != nil {
 		t.Fatalf("invoke allowed wrapped code tool: %v", err)
@@ -105,8 +104,8 @@ func TestCodeToolRuntimeAuthorizationRequiresCapabilityName(t *testing.T) {
 		TenantID: "tenant-a",
 		Roles:    []string{"code_reader"},
 	})
-	ctx = authz.WithAgentScope(ctx, authz.AgentScopePayment)
-	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapability(authz.AgentScopePayment, time.Minute))
+	ctx = authz.WithAgentScope(ctx, authz.AgentScopeObservability)
+	ctx = authz.WithAgentCapability(ctx, authz.NewAgentCapability(authz.AgentScopeObservability, time.Minute))
 
 	out, err := wrapped.InvokableRun(ctx, `{"query":"OpenPool","mode":"symbol"}`)
 	if err != nil {

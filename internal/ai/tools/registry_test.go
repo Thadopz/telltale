@@ -113,6 +113,8 @@ func TestRegistryIncludesReadOnlyPaymentAgentToolsForChat(t *testing.T) {
 		"query_payment_order_detail":        false,
 		"check_payment_consistency":         false,
 		"search_payment_logs":               false,
+		"analyze_log_window":                false,
+		"read_log_evidence":                 false,
 		"query_payment_status_distribution": false,
 	}
 	for _, candidate := range tools {
@@ -176,10 +178,16 @@ func TestRegistryGroupsChatToolsByDomain(t *testing.T) {
 	assertToolInDomain(t, byDomain, DomainObservability, "query_prometheus_alerts")
 	assertToolInDomain(t, byDomain, DomainDatabase, "mysql_crud")
 	assertToolInDomain(t, byDomain, DomainDatabase, "db_slow_queries")
-	assertToolInDomain(t, byDomain, DomainPayment, "query_payment_anomaly")
+	assertToolInDomain(t, byDomain, DomainObservability, "query_payment_anomaly")
 	assertToolInDomain(t, byDomain, DomainKnowledge, "query_internal_docs")
+	if len(sets) != 4 {
+		t.Fatalf("expected general + three functional domains, got %d", len(sets))
+	}
+	if _, err := NewRegistry().ToolsForAgent(ctx, ScenarioChat, authz.AgentScope("payment_agent")); err == nil {
+		t.Fatal("removed business agent scope is still accepted")
+	}
 
-	if byDomain[DomainObservability]["mysql_crud"] || byDomain[DomainDatabase]["query_payment_anomaly"] || byDomain[DomainPayment]["query_internal_docs"] {
+	if byDomain[DomainObservability]["mysql_crud"] || byDomain[DomainDatabase]["query_payment_anomaly"] || byDomain[DomainObservability]["query_internal_docs"] {
 		t.Fatalf("tools crossed domain boundaries: %#v", byDomain)
 	}
 }

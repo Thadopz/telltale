@@ -60,10 +60,13 @@ type SimplifiedAlert struct {
 }
 
 type PrometheusAlertsOutput struct {
-	Success bool              `json:"success"`
-	Alerts  []SimplifiedAlert `json:"alerts"`
-	Message string            `json:"message,omitempty"`
-	Error   string            `json:"error,omitempty"`
+	Matched   int               `json:"matched"`
+	Returned  int               `json:"returned"`
+	Truncated bool              `json:"truncated"`
+	Success   bool              `json:"success"`
+	Alerts    []SimplifiedAlert `json:"alerts"`
+	Message   string            `json:"message,omitempty"`
+	Error     string            `json:"error,omitempty"`
 }
 
 type prometheusAlertFilter struct {
@@ -131,28 +134,32 @@ func NewPrometheusAlertsQueryTool() (tool.InvokableTool, error) {
 				return marshalToolError(err, "failed to query Prometheus alerts"), nil
 			}
 			alerts := simplifyPrometheusAlerts(result.Data.Alerts, filter)
+			matched := 0
+			for _, alert := range result.Data.Alerts {
+				if prometheusAlertMatches(alert, filter) {
+					matched++
+				}
+			}
 			log.Printf("Prometheus alerts query completed: %d alerts found", len(alerts))
 			output := PrometheusAlertsOutput{
-				Success: true,
-				Alerts:  alerts,
-				Message: fmt.Sprintf("Successfully retrieved %d active alerts", len(alerts)),
+				Matched:   matched,
+				Returned:  len(alerts),
+				Truncated: matched > len(alerts),
+				Success:   true,
+				Alerts:    alerts,
+				Message:   fmt.Sprintf("Successfully retrieved %d active alerts", len(alerts)),
 			}
 			return marshalToolData(output, fmt.Sprintf("retrieved %d active Prometheus alerts", len(alerts))), nil
 		})
 }
 
 func simplifyPrometheusAlerts(alerts []PrometheusAlert, filter prometheusAlertFilter) []SimplifiedAlert {
-	seenAlertNames := make(map[string]bool)
 	result := make([]SimplifiedAlert, 0, len(alerts))
 	for _, alert := range alerts {
 		if !prometheusAlertMatches(alert, filter) {
 			continue
 		}
 		alertName := alert.Labels["alertname"]
-		if seenAlertNames[alertName] {
-			continue
-		}
-		seenAlertNames[alertName] = true
 		result = append(result, SimplifiedAlert{
 			AlertName:   boundedText(alertName, maxPrometheusLabelRunes),
 			Description: boundedText(alert.Annotations["description"], maxAlertDescriptionRunes),

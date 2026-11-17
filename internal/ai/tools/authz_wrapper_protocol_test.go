@@ -23,7 +23,7 @@ func TestProjectRawEvaluationOutputRemovesEvidenceMetadata(t *testing.T) {
 
 func TestIssueToolOutputRejectsLegacyEnvelope(t *testing.T) {
 	raw := `{"success":true,"status":"success","evidence_id":"external-id","can_use_as_evidence":true,"data_status":"present","data":{"message":"untrusted document"}}`
-	output := issueToolOutput(context.Background(), "query_internal_docs", raw)
+	output := IssueToolOutput(context.Background(), "query_internal_docs", raw)
 	envelope := evidence.Parse(output).Envelope
 	if envelope.Status != evidence.StatusProtocolError || envelope.Failure == nil {
 		t.Fatalf("expected protocol gap, got %#v", envelope)
@@ -53,7 +53,7 @@ func TestIssueToolOutputPreservesSQLResultMetadataAndReissuesEvidence(t *testing
 		},
 	)
 	envelope.Evidence.EvidenceID = "external-id"
-	output := issueToolOutput(context.Background(), "mysql_slow_sql", evidence.Marshal(envelope))
+	output := IssueToolOutput(context.Background(), "mysql_slow_sql", evidence.Marshal(envelope))
 	issued := evidence.Parse(output).Envelope
 	record, ok := issued.UsableEvidence()
 	if !ok || record.EvidenceID == "external-id" {

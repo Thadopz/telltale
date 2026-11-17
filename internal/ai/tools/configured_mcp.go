@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/runstate"
 	"github.com/Thadopz/telltale/internal/appconfig"
 	"github.com/Thadopz/telltale/internal/authz"
 	"os"
@@ -29,6 +30,8 @@ const (
 )
 
 type MCPServerConfig struct {
+	TerminalTools  []string           `json:"terminal_tools"`
+	CachePerTurn   bool               `json:"cache_per_turn"`
 	Name           string             `json:"name"`
 	Domain         Domain             `json:"domain"`
 	URL            string             `json:"url"`
@@ -46,6 +49,8 @@ type MCPServerConfig struct {
 type mcpServerToolLoader func(context.Context, MCPServerConfig, map[string]string) ([]tool.BaseTool, error)
 
 type configuredMCPTool struct {
+	terminal       bool
+	cachePerTurn   bool
 	inner          tool.InvokableTool
 	info           *schema.ToolInfo
 	serverName     string
@@ -87,6 +92,31 @@ func (t *configuredMCPTool) Info(context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON string, options ...tool.Option) (string, error) {
+	if runstate.Completed(ctx) {
+		return evidence.Marshal(evidence.NewData(runstate.CompletionMessage, runstate.CompletionMessage)), nil
+	}
+	if t.terminal && !runstate.DiagnosticReady(ctx) {
+		return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "DIAGNOSTIC_CHECKS_PENDING", "competing hypotheses or discriminating checks are missing", "Use record_diagnostic_hypotheses and complete the pending checks, or report an actual tool evidence gap.")), nil
+	}
+	if !t.terminal && !runstate.DiagnosticQueryAllowed(ctx, t.info.Name, argumentsInJSON) {
+		return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "DIAGNOSTIC_UNPLANNED_CHECK", "query does not match a declared discriminating check", "Record or update competing hypotheses with the exact next query arguments and a named evidence gap before querying.")), nil
+	}
+	var arguments any
+	if err := json.Unmarshal([]byte(argumentsInJSON), &arguments); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(arguments)
+	if err != nil {
+		return "", err
+	}
+	cacheKey := t.circuitKey + ":" + t.info.Name + ":" + string(canonical)
+	if t.cachePerTurn && !t.terminal {
+		unlock := runstate.LockQuery(ctx, cacheKey)
+		defer unlock()
+		if cached, ok := runstate.Cached(ctx, cacheKey); ok {
+			return cached, nil
+		}
+	}
 	if delay, open := configuredMCPCircuitDelay(t.circuitKey); open {
 		message := fmt.Sprintf("MCP server %s circuit is open; retry after %s", t.serverName, delay.Round(time.Second))
 		return marshalToolError(errors.New(message), "MCP server temporarily unavailable"), nil
@@ -107,12 +137,18 @@ func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON st
 			return marshalToolError(errors.New("MCP result did not contain a JSON text block"), "MCP raw eval output rejected"), nil
 		}
 		recordConfiguredMCPSuccess(t.circuitKey)
+		if t.terminal {
+			runstate.Complete(ctx)
+		}
 		return rawOutput, nil
 	}
-	if evidence.Parse(output).Envelope.Status != evidence.StatusSuccess {
+	if configuredMCPResultFailed(output) {
 		recordConfiguredMCPFailure(t.circuitKey)
 	} else {
 		recordConfiguredMCPSuccess(t.circuitKey)
+		if t.terminal {
+			runstate.Complete(ctx)
+		}
 	}
 	message := "MCP tool " + t.info.Name + " returned output"
 	observation := evidence.Observation{
@@ -137,11 +173,30 @@ func (t *configuredMCPTool) InvokableRun(ctx context.Context, argumentsInJSON st
 		if strings.TrimSpace(structured.Summary) == "" {
 			structured.Summary = message
 		}
-		return evidence.Marshal(structured), nil
+		result := evidence.Marshal(structured)
+		if t.cachePerTurn && !t.terminal {
+			runstate.Cache(ctx, cacheKey, result)
+		}
+		return result, nil
 	}
 	env := evidence.NewDataWithObservations(output, message, []evidence.Observation{observation})
 	env.Evidence.Attestation.IssuerTrust = evidence.ContentTrustUntrustedExternal
-	return evidence.Marshal(env), nil
+	result := evidence.Marshal(env)
+	if t.cachePerTurn && !t.terminal && !configuredMCPResultFailed(output) {
+		runstate.Cache(ctx, cacheKey, result)
+	}
+	return result, nil
+}
+
+func configuredMCPResultFailed(output string) bool {
+	var result struct {
+		Content []json.RawMessage `json:"content"`
+		IsError bool              `json:"isError"`
+	}
+	if json.Unmarshal([]byte(output), &result) == nil && result.Content != nil {
+		return result.IsError
+	}
+	return evidence.Parse(output).Envelope.Status != evidence.StatusSuccess
 }
 
 func configuredMCPTextOutput(output string) (string, bool) {
@@ -289,8 +344,6 @@ func loadConfiguredMCPServers(
 func normalizeMCPServerConfig(config MCPServerConfig) MCPServerConfig {
 	if len(config.AgentScopes) == 0 {
 		switch config.Domain {
-		case DomainPayment:
-			config.AgentScopes = []authz.AgentScope{authz.AgentScopePayment}
 		case DomainDatabase:
 			config.AgentScopes = []authz.AgentScope{authz.AgentScopeDatabase}
 		case DomainKnowledge:
@@ -347,7 +400,7 @@ func validateMCPServerConfig(config MCPServerConfig, seenNames map[string]bool) 
 		return fmt.Errorf("mcp server %s has no schema_version", config.Name)
 	}
 	switch config.Domain {
-	case DomainObservability, DomainDatabase, DomainPayment, DomainKnowledge:
+	case DomainObservability, DomainDatabase, DomainKnowledge:
 		break
 	default:
 		return fmt.Errorf("mcp server %s has unsupported domain %q", config.Name, config.Domain)
@@ -357,7 +410,7 @@ func validateMCPServerConfig(config MCPServerConfig, seenNames map[string]bool) 
 	}
 	for _, scope := range config.AgentScopes {
 		switch scope {
-		case authz.AgentScopePayment, authz.AgentScopeObservability, authz.AgentScopeDatabase, authz.AgentScopeKnowledge:
+		case authz.AgentScopeObservability, authz.AgentScopeDatabase, authz.AgentScopeKnowledge:
 		default:
 			return fmt.Errorf("mcp server %s has unsupported agent scope %q", config.Name, scope)
 		}
@@ -430,6 +483,7 @@ func configuredMCPServerCacheKey(config MCPServerConfig, headers map[string]stri
 
 func wrapConfiguredMCPTools(ctx context.Context, config MCPServerConfig, discoveredTools []tool.BaseTool) ([]tool.BaseTool, error) {
 	wrappedTools := make([]tool.BaseTool, 0, len(discoveredTools))
+	foundTerminal := make(map[string]bool)
 	serverPrefix := normalizeMCPServerName(config.Name)
 
 	for _, candidate := range discoveredTools {
@@ -447,7 +501,16 @@ func wrapConfiguredMCPTools(ctx context.Context, config MCPServerConfig, discove
 
 		namespacedInfo := *info
 		namespacedInfo.Name = serverPrefix + "__" + info.Name
+		terminal := false
+		for _, name := range config.TerminalTools {
+			if name == info.Name {
+				terminal = true
+				foundTerminal[name] = true
+			}
+		}
 		wrapped := &configuredMCPTool{
+			terminal:       terminal,
+			cachePerTurn:   config.CachePerTurn,
 			inner:          invokable,
 			info:           &namespacedInfo,
 			serverName:     config.Name,
@@ -459,6 +522,11 @@ func wrapConfiguredMCPTools(ctx context.Context, config MCPServerConfig, discove
 			schemaVersion:  config.SchemaVersion,
 		}
 		wrappedTools = append(wrappedTools, wrapAuthorizedToolWithPolicy(wrapped, config.Permission, config.AgentScopes, ExecutionPolicy{ReadOnly: true, Cancellable: true, Idempotent: true}))
+	}
+	for _, name := range config.TerminalTools {
+		if !foundTerminal[name] {
+			return nil, fmt.Errorf("mcp server %s terminal tool %q not found", config.Name, name)
+		}
 	}
 	return wrappedTools, nil
 }

@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Thadopz/telltale/internal/ai/contextbudget"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
+	"github.com/Thadopz/telltale/internal/ai/knowledgecompression"
+	"github.com/Thadopz/telltale/internal/ai/models"
+	"github.com/Thadopz/telltale/internal/ai/runstate"
 	"github.com/Thadopz/telltale/internal/appconfig"
 	"github.com/Thadopz/telltale/internal/authz"
+	"github.com/Thadopz/telltale/utility/mem"
 	"strings"
 	"time"
 
@@ -44,11 +49,16 @@ func (t *authorizedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return t.inner.Info(ctx)
 }
 
-func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (result string, resultErr error) {
 	info, err := t.inner.Info(ctx)
 	if err != nil {
 		return "", err
 	}
+	defer func() {
+		if resultErr == nil {
+			runstate.RecordDiagnostic(ctx, info.Name, argumentsInJSON, evidence.Parse(result).Envelope)
+		}
+	}()
 	call := buildToolCall(ctx, info.Name, argumentsInJSON, t.overridePermission)
 	if len(t.overrideAgentScopes) > 0 {
 		call.AllowedAgentScopes = append([]authz.AgentScope(nil), t.overrideAgentScopes...)
@@ -57,6 +67,13 @@ func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	auditToolDecision(ctx, call, decision)
 	if !decision.Allowed {
 		return marshalToolError(nil, "tool authorization denied: "+decision.Reason), nil
+	}
+	terminal := false
+	if configured, ok := t.inner.(*configuredMCPTool); ok {
+		terminal = configured.terminal
+	}
+	if !terminal && !runstate.DiagnosticQueryAllowed(ctx, info.Name, argumentsInJSON) {
+		return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "DIAGNOSTIC_UNPLANNED_CHECK", "query does not match the declared diagnostic plan", "Record the exact check arguments and the evidence gap it addresses before querying.")), nil
 	}
 	policy := t.overrideExecutionPolicy
 	if policy == (ExecutionPolicy{}) {
@@ -67,23 +84,93 @@ func (t *authorizedTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	timeout := toolCallTimeout(ctx)
+	finishBudget, available := contextbudget.ReserveToolOutput(ctx, contextbudget.ToolLimits(ctx).OutputTokens)
+	if !available {
+		return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "TOOL_BUDGET_EXHAUSTED", "shared turn budget exhausted", "Stop tool expansion; report current evidence and coverage gaps.")), nil
+	}
 	output, invokeErr := invokeToolWithPolicyTimeout(ctx, t.inner, info.Name, argumentsInJSON, timeout, policy, call.OperationID, opts...)
 	if invokeErr == nil {
-		output = issueToolOutput(ctx, info.Name, output)
+		if info.Name == "query_internal_docs" && knowledgecompression.NeedsSelectionInContext(ctx, evidence.Parse(output).Envelope) {
+			strategy, strategyErr := knowledgecompression.Policy(ctx)
+			if strategyErr != nil {
+				finishBudget(0)
+				return "", strategyErr
+			}
+			if strategy != "baseline" && contextString(ctx, "client_id") != "" {
+				principal := authz.PrincipalFromContext(ctx)
+				if err := mem.SaveKnowledgeAudit(ctx, mem.MemoryPrincipal{TenantID: principal.TenantID, UserID: principal.UserID}, contextString(ctx, "client_id"), argumentsInJSON, output); err != nil {
+					finishBudget(0)
+					return "", fmt.Errorf("persist original knowledge audit: %w", err)
+				}
+			}
+		}
+		output = IssueToolOutput(ctx, info.Name, output)
 		evidence.RecordRuntimeAnchors(ctx, evidence.Parse(output).Envelope)
 	}
+	finishBudget(contextbudget.EstimateTextTokens(output))
 	return output, invokeErr
 }
 
-func issueToolOutput(ctx context.Context, toolName string, output string) string {
+// IssueToolOutput is the shared production and controlled-replay signing boundary.
+func IssueToolOutput(ctx context.Context, toolName string, output string) string {
+	limits := contextbudget.ToolLimits(ctx)
 	if mode, err := appconfig.EvaluationEvidenceMode(ctx); err == nil && mode == "raw_unenforced" {
-		return projectRawEvaluationOutput(output)
+		projected := projectRawEvaluationOutput(output)
+		if contextbudget.EstimateTextTokens(projected) > limits.OutputTokens {
+			return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "RESULT_BUDGET_EXCEEDED", "raw evaluation result exceeds budget", "Stop expansion or narrow the query."))
+		}
+		return projected
 	}
 	parsed := evidence.Parse(output)
 	if !parsed.IsJSON {
 		return evidence.Marshal(evidence.NewUnstructuredResult(toolName))
 	}
+	if toolName == "query_internal_docs" {
+		parsed.Envelope.Data = mem.RedactKnowledgePayload(parsed.Envelope.Data)
+	} else {
+		if toolName == "search_logs" || toolName == "search_traces" || toolName == "read_evidence" {
+			parsed.Envelope.Data = redactTelemetryData(ctx, parsed.Envelope.Data)
+		} else {
+			parsed.Envelope.Data = mem.RedactToolPayload(parsed.Envelope.Data)
+		}
+	}
+	if parsed.Envelope.Evidence != nil {
+		for i := range parsed.Envelope.Evidence.Observations {
+			obs := &parsed.Envelope.Evidence.Observations[i]
+			if toolName == "query_internal_docs" && obs.Kind == evidence.ObservationRunbookRule {
+				obs.Fields = mem.RedactKnowledgeFields(obs.Fields)
+			} else {
+				obs.Fields, _ = mem.RedactToolPayload(obs.Fields).(map[string]any)
+			}
+		}
+	}
 	parsed.Envelope = evidence.SanitizeUntrustedEnvelope(parsed.Envelope)
+	if toolName == "query_internal_docs" {
+		policy, err := knowledgecompression.Policy(ctx)
+		if err != nil {
+			return marshalToolError(err, "invalid knowledge compression policy")
+		}
+		if policy != "baseline" && knowledgecompression.NeedsSelectionInContext(ctx, parsed.Envelope) {
+			selector, err := models.OpenAIForDeepSeekV3Quick(ctx)
+			if err != nil {
+				return marshalToolError(err, "knowledge compression unavailable; evidence gap")
+			}
+			selected, report, err := knowledgecompression.Select(ctx, parsed.Envelope, knowledgecompression.GoalFromContext(ctx), policy, selector)
+			if err != nil {
+				failure := evidence.NewError(err, "knowledge compression failed; original result was not presented, evidence gap")
+				failure.Data = map[string]any{"compression": report}
+				return evidence.Marshal(failure)
+			}
+			selected.Data = map[string]any{"compression": report}
+			if contextbudget.EstimateTextTokens(evidence.Marshal(selected)) > limits.ContentTokens() {
+				failure := evidence.NewFailure(evidence.StatusError, "KNOWLEDGE_SELECTION_BUDGET_EXCEEDED", "selected original paragraphs and metadata exceed signed tool budget", "Evidence gap; narrow the documentation query.")
+				failure.Data = map[string]any{"compression": report}
+				return evidence.Marshal(failure)
+			}
+			parsed.Envelope = selected
+		}
+	}
+	parsed.Envelope = evidence.BoundOutputWithLimit(parsed.Envelope, limits.OutputTokens)
 	if parsed.Envelope.Status != evidence.StatusSuccess {
 		return evidence.Marshal(parsed.Envelope)
 	}
@@ -101,7 +188,11 @@ func issueToolOutput(ctx context.Context, toolName string, output string) string
 		TrustLevel:     trustLevel,
 		ExpiresAfter:   10 * time.Minute,
 	})
-	return evidence.Marshal(issued)
+	output = evidence.Marshal(issued)
+	if contextbudget.EstimateTextTokens(output) > limits.OutputTokens {
+		return evidence.Marshal(evidence.NewFailure(evidence.StatusError, "RESULT_BUDGET_EXCEEDED", "signed result exceeds budget", "Stop expanding this query; narrow the scope."))
+	}
+	return output
 }
 
 func projectRawEvaluationOutput(output string) string {
