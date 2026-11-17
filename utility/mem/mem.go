@@ -89,7 +89,6 @@ func (c *SimpleMemory) SetMessages(msg *schema.Message) {
 
 	c.Messages = append(c.Messages, msg)
 	c.UpdatedAt = time.Now()
-	c.compactLocked()
 	c.persistLocked(msg)
 }
 
@@ -175,24 +174,6 @@ func cloneMessages(messages []*schema.Message) []*schema.Message {
 	return cloned
 }
 
-func summarizeMessages(messages []*schema.Message) string {
-	lines := make([]string, 0, len(messages))
-	for _, msg := range messages {
-		if msg == nil {
-			continue
-		}
-		content := strings.TrimSpace(strings.ReplaceAll(msg.Content, "\n", " "))
-		if content == "" {
-			continue
-		}
-		lines = append(lines, string(msg.Role)+": "+trimRunes(content, 300))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n")
-}
-
 func trimRunes(s string, max int) string {
 	if max <= 0 || utf8.RuneCountInString(s) <= max {
 		return s
@@ -232,7 +213,6 @@ func newSimpleMemory(userID string, id string, store memoryStore) *SimpleMemory 
 	if snapshot.MaxWindowSize > 0 {
 		mem.MaxWindowSize = snapshot.MaxWindowSize
 	}
-	mem.compactLocked()
 	return mem
 }
 

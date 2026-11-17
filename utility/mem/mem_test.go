@@ -63,7 +63,7 @@ func TestGetContextMessagesLimitsCharBudget(t *testing.T) {
 	}
 }
 
-func TestStoredMessagesAreTrimmedInPairs(t *testing.T) {
+func TestMessagesRemainUntilExplicitCompaction(t *testing.T) {
 	m := &SimpleMemory{MaxWindowSize: 4}
 	for i := 0; i < 4; i++ {
 		m.SetMessages(schema.UserMessage("q"))
@@ -71,8 +71,8 @@ func TestStoredMessagesAreTrimmedInPairs(t *testing.T) {
 	}
 
 	msgs := m.GetMessages()
-	if len(msgs) != 4 {
-		t.Fatalf("expected 4 stored messages, got %d", len(msgs))
+	if len(msgs) != 8 {
+		t.Fatalf("expected 8 uncompressed messages, got %d", len(msgs))
 	}
 }
 
@@ -84,6 +84,7 @@ func TestTrimmedMessagesAreMergedIntoSummary(t *testing.T) {
 	m.SetMessages(schema.AssistantMessage("second-answer", nil))
 	m.SetMessages(schema.UserMessage("third-question"))
 	m.SetMessages(schema.AssistantMessage("third-answer", nil))
+	commitQuotedPrefix(t, m, 2)
 
 	summary := m.GetSummary()
 	if !strings.Contains(summary, "first-question") || !strings.Contains(summary, "first-answer") {
@@ -99,15 +100,15 @@ func TestTrimmedMessagesAreMergedIntoSummary(t *testing.T) {
 	}
 }
 
-func TestSummaryIsTrimmedToBudget(t *testing.T) {
+func TestOversizeTaskStateDoesNotDiscardMessages(t *testing.T) {
 	m := &SimpleMemory{MaxWindowSize: 2}
-	for i := 0; i < 40; i++ {
-		m.SetMessages(schema.UserMessage(strings.Repeat("x", 300)))
-		m.SetMessages(schema.AssistantMessage(strings.Repeat("y", 300), nil))
+	m.Messages = []*schema.Message{schema.UserMessage("old"), schema.AssistantMessage("answer", nil), schema.UserMessage("new"), schema.AssistantMessage("latest", nil)}
+	state := taskState{Entries: []taskEntry{{Kind: "goal", Status: "current", Text: strings.Repeat("条件", defaultSummaryMaxChars)}}}
+	if err := m.commitTaskState(state, 2); err == nil {
+		t.Fatal("oversize state accepted")
 	}
-
-	if got := len([]rune(m.GetSummary())); got > defaultSummaryMaxChars {
-		t.Fatalf("expected summary <= %d runes, got %d", defaultSummaryMaxChars, got)
+	if len(m.Messages) != 4 || m.Summary != "" {
+		t.Fatal("oversize state discarded history")
 	}
 }
 
@@ -121,6 +122,7 @@ func TestSimpleMemoryPersistsMessagesAndSummary(t *testing.T) {
 	memory.SetMessages(schema.AssistantMessage("first-answer", nil))
 	memory.SetMessages(schema.UserMessage("second-question"))
 	memory.SetMessages(schema.AssistantMessage("second-answer", nil))
+	commitQuotedPrefix(t, memory, 2)
 
 	mu.Lock()
 	SimpleMemoryMap = make(map[string]*SimpleMemory)
@@ -231,7 +233,6 @@ func TestMySQLMemoryStorePersistsMessagesAndSummary(t *testing.T) {
 		_, _ = g.DB().Model("conversation_turns").Where("conversation_id", id).Delete()
 		_, _ = g.DB().Model("conversation_summaries").Where("conversation_id", id).Delete()
 		_, _ = g.DB().Model("session_states").Where("conversation_id", id).Delete()
-		_, _ = g.DB().Model("durable_memories").Where("user_id", id).Delete()
 		_, _ = g.DB().Model("tool_results").Where("conversation_id", id).Delete()
 		_, _ = g.DB().Model("conversations").Where("conversation_id", id).Delete()
 	})
@@ -270,16 +271,6 @@ func TestMySQLMemoryStorePersistsMessagesAndSummary(t *testing.T) {
 	if err = UpdateSessionState(context.Background(), id, id, "follow-up question", "logs show a timeout"); err != nil {
 		t.Fatalf("update mysql session state: %v", err)
 	}
-	if _, err = g.DB().Model("durable_memories").Data(g.Map{
-		"user_id":       id,
-		"memory_key":    "preference.answer_detail",
-		"kind":          "preference",
-		"content":       "keep incident summaries short",
-		"status":        "active",
-		"vector_status": "pending",
-	}).Insert(); err != nil {
-		t.Fatalf("insert durable memory fixture: %v", err)
-	}
 	if err = SaveToolResult(context.Background(), id, id, ToolResult{
 		ToolName:      "query_log",
 		InputJSON:     `{"query":"timeout"}`,
@@ -311,8 +302,8 @@ func TestMySQLMemoryStorePersistsMessagesAndSummary(t *testing.T) {
 	if !strings.Contains(layers.SessionState, "follow-up question") {
 		t.Fatalf("expected mysql session payload update, got %q", layers.SessionState)
 	}
-	if !strings.Contains(layers.DurableMemory, "keep incident summaries short") {
-		t.Fatalf("expected mysql durable memory layer, got %q", layers.DurableMemory)
+	if layers.DurableMemory != "" {
+		t.Fatalf("expected no long-term context outside active mode, got %q", layers.DurableMemory)
 	}
 	if !strings.Contains(layers.ToolResults, "query_log [success]: found 3 timeout rows") {
 		t.Fatalf("expected mysql tool result layer, got %q", layers.ToolResults)
@@ -332,16 +323,6 @@ func TestFormatContextLayers(t *testing.T) {
 		t.Fatalf("expected formatted session state, got %q", state)
 	}
 
-	durable := formatDurableMemories([]durableMemoryRow{
-		{Kind: "preference", Content: "keep incident summaries short"},
-		{Content: "production changes need confirmation"},
-	})
-	if !strings.Contains(durable, "- preference: keep incident summaries short") {
-		t.Fatalf("expected formatted durable preference, got %q", durable)
-	}
-	if !strings.Contains(durable, "- memory: production changes need confirmation") {
-		t.Fatalf("expected default durable memory kind, got %q", durable)
-	}
 }
 
 func TestTrimSessionStateText(t *testing.T) {

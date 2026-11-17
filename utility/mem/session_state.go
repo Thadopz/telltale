@@ -18,11 +18,12 @@ const (
 )
 
 type sessionStatePayload struct {
+	DiagnosticState     string `json:"diagnostic_state,omitempty"`
 	RecentUserQuery     string `json:"recent_user_query"`
 	RecentAssistantTurn string `json:"recent_assistant_turn"`
 }
 
-func UpdateSessionState(ctx context.Context, userID string, conversationID string, userQuery string, assistantTurn string) error {
+func UpdateSessionState(ctx context.Context, userID string, conversationID string, userQuery string, assistantTurn string, diagnosticState ...string) error {
 	scope := normalizeMemoryScope(userID, conversationID)
 	userQuery = strings.TrimSpace(userQuery)
 	assistantTurn = strings.TrimSpace(assistantTurn)
@@ -40,7 +41,15 @@ func UpdateSessionState(ctx context.Context, userID string, conversationID strin
 		goal = trimSessionStateText(userQuery, sessionStateGoalMaxChars)
 	}
 
+	retained := ""
+	if len(diagnosticState) > 0 {
+		retained = diagnosticState[0]
+		if retained != "" && (!json.Valid([]byte(retained)) || len(retained) > 24000) {
+			return errors.New("diagnostic state must be bounded valid JSON")
+		}
+	}
 	payload, err := json.Marshal(sessionStatePayload{
+		DiagnosticState:     retained,
 		RecentUserQuery:     trimSessionStateText(userQuery, sessionStateMessageMaxChars),
 		RecentAssistantTurn: trimSessionStateText(assistantTurn, sessionStateMessageMaxChars),
 	})

@@ -209,92 +209,6 @@ func (c *SimpleMemory) SetCompactionPolicy(policy CompactionPolicy) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Policy = normalizeCompactionPolicy(policy)
-	c.compactLocked()
-	if c.compactionPending {
-		// A policy change can compact already-loaded messages before the next
-		// user turn is appended. Persist that snapshot immediately so token
-		// counts, generation, and exact facts are not lost on a failed turn.
-		c.persistLocked(nil)
-	}
-}
-
-func (c *SimpleMemory) compactLocked() {
-	if c == nil || len(c.Messages) == 0 {
-		return
-	}
-
-	policy := c.compactionPolicy()
-	maxStoredMessages := normalizeMaxMessages(c.MaxWindowSize)
-	triggerTokens := int(float64(policy.MaxTokens) * policy.TriggerRatio)
-	targetTokens := int(float64(policy.MaxTokens) * policy.TargetRatio)
-	beforeTokens := EstimateMessagesTokens(c.Messages) + EstimateTextTokens(c.Summary)
-	if len(c.Messages) <= maxStoredMessages && beforeTokens <= triggerTokens {
-		return
-	}
-
-	compactedMessages := 0
-	for len(c.Messages) > maxStoredMessages || EstimateMessagesTokens(c.Messages)+EstimateTextTokens(c.Summary) > targetTokens {
-		if len(c.Messages) <= 1 {
-			break
-		}
-
-		minRecent := policy.MinRecentMessages
-		if minRecent >= len(c.Messages) {
-			minRecent = len(c.Messages) - 1
-		}
-		if minRecent < 1 {
-			minRecent = 1
-		}
-		maxRemovable := len(c.Messages) - minRecent
-		if maxRemovable <= 0 {
-			break
-		}
-
-		removeCount := len(c.Messages) - maxStoredMessages
-		if removeCount <= 0 {
-			removeCount = 2
-		}
-		if removeCount > maxRemovable {
-			removeCount = maxRemovable
-		}
-		if removeCount > 1 && removeCount%2 != 0 && removeCount+1 <= maxRemovable {
-			removeCount++
-		}
-
-		c.mergeSummary(c.Messages[:removeCount])
-		c.Messages = cloneMessages(c.Messages[removeCount:])
-		compactedMessages += removeCount
-	}
-
-	if compactedMessages == 0 {
-		return
-	}
-
-	c.Compaction.Generation++
-	c.Compaction.BeforeTokens = beforeTokens
-	c.Compaction.AfterTokens = EstimateMessagesTokens(c.Messages) + EstimateTextTokens(c.Summary)
-	c.Compaction.CompactedMessages = compactedMessages
-	c.Compaction.CreatedAt = time.Now()
-	c.Compaction.Pending = true
-	c.compactionPending = true
-}
-
-func (c *SimpleMemory) mergeSummary(messages []*schema.Message) {
-	if len(messages) == 0 {
-		return
-	}
-
-	c.Facts = mergeContextFacts(c.Facts, extractContextFacts(messages), c.compactionPolicy().MaxFacts)
-	summaryPart := summarizeMessages(messages)
-	if summaryPart == "" {
-		return
-	}
-	if strings.TrimSpace(c.Summary) == "" {
-		c.Summary = summaryPart
-	} else {
-		c.Summary += "\n" + summaryPart
-	}
-	c.Summary = trimRunes(c.Summary, c.compactionPolicy().MaxSummaryChars)
 }
 
 // GetContextSummary returns the narrative summary followed by exact details.
@@ -306,7 +220,7 @@ func (c *SimpleMemory) GetContextSummary(maxChars int) string {
 
 	parts := make([]string, 0, 2)
 	if strings.TrimSpace(c.Summary) != "" {
-		parts = append(parts, c.Summary)
+		parts = append(parts, renderTaskSummary(c.Summary))
 	}
 	facts := formatContextFacts(c.Facts)
 	if facts != "" {
@@ -316,7 +230,33 @@ func (c *SimpleMemory) GetContextSummary(maxChars int) string {
 	if maxChars <= 0 {
 		maxChars = defaultContextSummaryMaxChars
 	}
-	return trimRunes(result, maxChars)
+	return BoundContextSummary(result, maxChars, false)
+}
+
+// BoundContextSummary preserves whole structured records under character or token limits.
+func BoundContextSummary(result string, limit int, tokens bool) string {
+	if limit <= 0 {
+		return ""
+	}
+	size := func(text string) int {
+		if tokens {
+			return EstimateTextTokens(text)
+		}
+		return utf8.RuneCountInString(text)
+	}
+	if size(result) <= limit {
+		return result
+	}
+	lines := []string{"Task context exceeds display budget; complete records omitted. Check archived turns for missing details."}
+	for _, line := range strings.Split(result, "\n") {
+		if size(strings.Join(append(lines, line), "\n")) <= limit {
+			lines = append(lines, line)
+		}
+	}
+	if size(lines[0]) > limit {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (c *SimpleMemory) GetContextFacts() []ContextFact {
@@ -430,7 +370,9 @@ func mergeContextFacts(existing []ContextFact, incoming []ContextFact, maxFacts 
 
 func contextFactPriority(kind string) int {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "claim_id", "claim_type", "assertion_kind", "coverage_status", "hypothesis_id", "hypothesis_status", "evidence_id", "failed_query_id":
+	case "hypothesis_state":
+		return 0
+	case "claim_id", "claim_type", "assertion_kind", "coverage_status", "hypothesis_id", "hypothesis_status", "evidence_id", "failed_query_id", "log_reference", "log_window_state", "coverage_gap", "completed_log_check":
 		return 0
 	case "key_value", "path_or_url", "status_or_code":
 		return 1

@@ -1,161 +1,118 @@
 package mem
 
 import (
-	"context"
-	"path/filepath"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Thadopz/telltale/utility/storage"
 	"github.com/cloudwego/eino/schema"
 	"github.com/gogf/gf/v2/frame/g"
 )
 
-func TestCompactionPreservesExactDetailsInCrowdedHistory(t *testing.T) {
-	memory := &SimpleMemory{
-		ID:            "crowded-context",
-		MaxWindowSize: 50,
-		Policy: CompactionPolicy{
-			MaxTokens:         120,
-			TriggerRatio:      0.70,
-			TargetRatio:       0.50,
-			MinRecentMessages: 2,
-			MaxSummaryChars:   3000,
-			MaxFacts:          100,
-		},
+// 直接验证状态提交与持久化，不模拟模型生成质量。
+func commitQuotedPrefix(t *testing.T, memory *SimpleMemory, cut int) {
+	t.Helper()
+	sources := compactionSources(memory.Summary, memory.Messages[:cut])
+	state := taskState{}
+	for _, source := range sources {
+		state.Entries = append(state.Entries, taskEntry{Kind: "finding", Status: "reported", Text: source.Quote, Sources: []taskSource{source}})
 	}
-
-	memory.SetMessages(schema.UserMessage("The failing request is /api/v1/card/create and has request_id=req-42."))
-	memory.SetMessages(schema.AssistantMessage("The request returned HTTP 500 with evidence_id=ev_profile_123 and error_code=ERR_PROFILE_DOWN.", nil))
-	for index := 0; index < 20; index++ {
-		memory.SetMessages(schema.UserMessage("unrelated diagnostic noise " + strings.Repeat("noise ", 20)))
-		memory.SetMessages(schema.AssistantMessage("unrelated result "+strings.Repeat("result ", 20), nil))
-	}
-
-	if memory.Compaction.Generation == 0 {
-		t.Fatal("expected crowded history to trigger compaction")
-	}
-	if len(memory.GetMessages()) >= 40 {
-		t.Fatalf("expected old messages to move out of active history, got %d messages", len(memory.GetMessages()))
-	}
-
-	contextSummary := memory.GetContextSummary(6000)
-	for _, detail := range []string{
-		"/api/v1/card/create",
-		"HTTP 500",
-		"req-42",
-		"ev_profile_123",
-		"ERR_PROFILE_DOWN",
-	} {
-		if !strings.Contains(contextSummary, detail) {
-			t.Fatalf("expected exact detail %q after compaction, summary=%q", detail, contextSummary)
-		}
+	if err := memory.commitTaskState(state, cut); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestCompactionKeepsRecentMessagesAndTracksTokenCounts(t *testing.T) {
-	memory := &SimpleMemory{
-		ID:            "token-threshold",
-		MaxWindowSize: 20,
-		Policy: CompactionPolicy{
-			MaxTokens:         100,
-			TriggerRatio:      0.70,
-			TargetRatio:       0.50,
-			MinRecentMessages: 2,
-			MaxSummaryChars:   2000,
-			MaxFacts:          20,
-		},
+func TestCompactionStateValidationPreservesCorrectionsAndConditions(t *testing.T) {
+	messages := []*schema.Message{
+		schema.UserMessage("仅在测试环境操作，禁止重启。order_id=ord-42"),
+		schema.AssistantMessage("曾怀疑连接池耗尽；ev_pool_1 显示连接充足，已排除。", nil),
+		schema.UserMessage("纠正：排查服务B，之前服务A的结论不适用。"),
 	}
-	memory.SetMessages(schema.UserMessage("old question with evidence_id=ev_old_1"))
-	memory.SetMessages(schema.AssistantMessage("old answer HTTP 503", nil))
-	memory.SetMessages(schema.UserMessage("recent question"))
-	memory.SetMessages(schema.AssistantMessage("recent answer", nil))
-	memory.SetMessages(schema.UserMessage(strings.Repeat("current detail ", 30)))
-
-	if memory.Compaction.Generation == 0 {
-		t.Fatal("expected token threshold to trigger compaction")
+	sources := compactionSources("", messages)
+	state := taskState{Entries: []taskEntry{
+		{Kind: "constraint", Status: "current", Text: messages[0].Content, Sources: []taskSource{sources[0]}},
+		{Kind: "hypothesis", Status: "rejected", Text: messages[1].Content, Sources: []taskSource{sources[1]}},
+		{Kind: "goal", Status: "current", Text: messages[2].Content, Sources: []taskSource{sources[2]}},
+	}}
+	raw, _ := json.Marshal(state)
+	if _, err := validateTaskState(string(raw), sources, 4000); err != nil {
+		t.Fatal(err)
 	}
-	if memory.Compaction.BeforeTokens <= 0 || memory.Compaction.AfterTokens <= 0 {
-		t.Fatalf("expected token counts in compaction metadata, metadata=%#v", memory.Compaction)
+	state.Entries[0].Sources[0].Quote = "允许重启"
+	raw, _ = json.Marshal(state)
+	if _, err := validateTaskState(string(raw), sources, 4000); err == nil {
+		t.Fatal("altered quotation accepted")
 	}
-	messages := memory.GetMessages()
-	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1].Content, "current detail") {
-		t.Fatalf("expected newest message to remain active, messages=%#v", messages)
-	}
-	if !strings.Contains(memory.GetContextSummary(4000), "ev_old_1") {
-		t.Fatal("expected old evidence id to remain in exact facts")
+	if _, err := validateTaskState(`{"entries":[]}`, sources, 4000); err == nil {
+		t.Fatal("empty state accepted")
 	}
 }
 
-func TestSQLiteContextSnapshotRoundTrip(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "telltale.db")
-	t.Setenv("SUPERBIZ_SQLITE_PATH", databasePath)
-	ctx := context.Background()
-	if err := storage.Initialize(ctx); err != nil {
-		t.Fatalf("initialize sqlite storage: %v", err)
-	}
-
-	conversationID := "sqlite-compaction-" + time.Now().Format("150405.000000000")
-	memory := &SimpleMemory{
-		ID:            conversationID,
-		UserID:        "local-user",
-		MaxWindowSize: 20,
-		Policy: CompactionPolicy{
-			MaxTokens:         80,
-			TriggerRatio:      0.70,
-			TargetRatio:       0.50,
-			MinRecentMessages: 2,
-			MaxSummaryChars:   2000,
-			MaxFacts:          20,
-		},
-		store: newSQLiteMemoryStore(),
-	}
-	memory.SetMessages(schema.UserMessage("old request evidence_id=ev_sqlite_1 HTTP 500"))
-	memory.SetMessages(schema.AssistantMessage(strings.Repeat("old answer ", 30), nil))
-	memory.SetMessages(schema.UserMessage("new request"))
-	memory.SetMessages(schema.AssistantMessage("new answer", nil))
-
-	if memory.Compaction.Generation == 0 {
-		t.Fatal("expected sqlite fixture to compact")
-	}
-	memory.AddContextFacts([]ContextFact{
-		{Kind: "claim_id", Value: "claim_callback_root_cause", SourceRole: "claim_pipeline"},
-		{Kind: "coverage_status", Value: "claim_callback_root_cause=unknown", SourceRole: "matcher"},
-		{Kind: "failed_query_id", Value: "fq_dependency_check", SourceRole: "diagnostic_loop"},
-		{Kind: "diagnostic_note", Value: "password=not-persisted", SourceRole: "tool_output"},
-	})
-	turnCount, err := g.DB().Model("conversation_turns").Where("conversation_id", conversationID).Count()
-	if err != nil {
-		t.Fatalf("count archived conversation turns: %v", err)
-	}
-	if turnCount != 4 {
-		t.Fatalf("expected raw turns to remain archived after compaction, got %d", turnCount)
-	}
-	reloaded, err := newSQLiteMemoryStore().Load(conversationID)
-	if err != nil {
-		t.Fatalf("load sqlite context snapshot: %v", err)
-	}
-	if reloaded == nil || reloaded.Compaction.Generation == 0 {
-		t.Fatalf("expected persisted compaction metadata, snapshot=%#v", reloaded)
-	}
-	if !strings.Contains(reloaded.Summary, "ev_sqlite_1") && !containsFact(reloaded.Facts, "ev_sqlite_1") {
-		t.Fatalf("expected persisted evidence detail, summary=%q facts=%#v", reloaded.Summary, reloaded.Facts)
-	}
-	for _, value := range []string{"claim_callback_root_cause", "claim_callback_root_cause=unknown", "fq_dependency_check"} {
-		if !containsFact(reloaded.Facts, value) {
-			t.Fatalf("expected structured context fact %q after reload, facts=%#v", value, reloaded.Facts)
+func TestCompactionArchivesRawTurnsAndRestoresCheckpoint(t *testing.T) {
+	id := "task-compact-" + time.Now().Format("150405.000000000")
+	memory := &SimpleMemory{ID: id, UserID: "task-user", MaxWindowSize: 4, store: newSQLiteMemoryStore()}
+	for _, text := range []string{"original order_id=ord-42", "hypothesis rejected ev_pool_1", "current goal", "current answer"} {
+		role := schema.User
+		if len(memory.Messages)%2 == 1 {
+			role = schema.Assistant
 		}
+		memory.SetMessages(&schema.Message{Role: role, Content: text})
 	}
-	if containsFact(reloaded.Facts, "password=not-persisted") {
-		t.Fatalf("sensitive context fact must not survive SQLite persistence: %#v", reloaded.Facts)
+	commitQuotedPrefix(t, memory, 2)
+	count, err := g.DB().Model("conversation_turns").Where("conversation_id", id).Count()
+	if err != nil || count != 4 {
+		t.Fatalf("raw turns changed: %d %v", count, err)
+	}
+	snapshot, err := newSQLiteMemoryStore().Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Messages) != 2 || snapshot.Messages[0].Content != "current goal" {
+		t.Fatalf("wrong checkpoint: %#v", snapshot.Messages)
+	}
+	if !json.Valid([]byte(snapshot.Summary)) || !strings.Contains(snapshot.Summary, "ord-42") {
+		t.Fatal("lost state")
+	}
+	if !containsFact(snapshot.Facts, "order_id=ord-42") {
+		t.Fatal("lost exact identifier")
+	}
+	reloaded := newSimpleMemory("task-user", id, newSQLiteMemoryStore())
+	reloaded.SetMessages(schema.UserMessage("new goal"))
+	reloaded.SetMessages(schema.AssistantMessage("new answer", nil))
+	commitQuotedPrefix(t, reloaded, 2)
+	snapshot, err = newSQLiteMemoryStore().Load(id)
+	if err != nil || len(snapshot.Messages) != 2 || snapshot.Messages[0].Content != "new goal" {
+		t.Fatalf("second checkpoint failed: %#v %v", snapshot, err)
+	}
+}
+
+func TestCompactionFailureLeavesHistoryIntact(t *testing.T) {
+	memory := &SimpleMemory{ID: "failure", MaxWindowSize: 2, store: failingMemoryStore{}}
+	memory.Messages = []*schema.Message{schema.UserMessage("old"), schema.AssistantMessage("answer", nil), schema.UserMessage("new"), schema.AssistantMessage("latest", nil)}
+	state := taskState{Entries: []taskEntry{{Kind: "goal", Status: "current", Text: "old"}}}
+	if err := memory.commitTaskState(state, 2); err == nil {
+		t.Fatal("storage failure ignored")
+	}
+	if len(memory.Messages) != 4 || memory.Summary != "" || memory.Compaction.Generation != 0 {
+		t.Fatal("failed commit changed history")
+	}
+}
+
+func TestTaskSummaryNeverSlicesARecord(t *testing.T) {
+	state := taskState{Version: 1, Entries: []taskEntry{{Kind: "constraint", Status: "current", Text: strings.Repeat("条件", 100) + "禁止重启"}}}
+	raw, _ := json.Marshal(state)
+	memory := &SimpleMemory{Summary: string(raw)}
+	view := memory.GetContextSummary(150)
+	if strings.Contains(view, "条件") || !strings.Contains(view, "omitted") {
+		t.Fatalf("partial record exposed: %s", view)
 	}
 }
 
 func TestDynamicCompactionMaxTokensIsBounded(t *testing.T) {
-	limit := DynamicCompactionMaxTokens(context.Background())
+	limit := DynamicCompactionMaxTokens(t.Context())
 	if limit < defaultDynamicCompactionMinTokens || limit > defaultDynamicCompactionMaxTokens {
-		t.Fatalf("expected dynamic compaction limit in [%d,%d], got %d", defaultDynamicCompactionMinTokens, defaultDynamicCompactionMaxTokens, limit)
+		t.Fatalf("invalid dynamic budget %d", limit)
 	}
 }
 

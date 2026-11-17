@@ -3,6 +3,7 @@ package mem
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -36,15 +37,6 @@ func (s *sqliteMemoryStore) Load(id string) (*memorySnapshot, error) {
 	ctx := context.Background()
 
 	var turns []mysqlTurn
-	if err := g.DB().Model("conversation_turns").
-		Ctx(ctx).
-		Fields("role", "content").
-		Where("conversation_id", id).
-		OrderDesc("id").
-		Limit(defaultStoredWindowSize).
-		Scan(&turns); err != nil {
-		return nil, err
-	}
 
 	summaryRecord, err := g.DB().Model("conversation_summaries").
 		Ctx(ctx).
@@ -66,6 +58,19 @@ func (s *sqliteMemoryStore) Load(id string) (*memorySnapshot, error) {
 	if err != nil && !isMissingContextSnapshotsTable(err) {
 		return nil, err
 	}
+	var state taskState
+	if !summaryRecord.IsEmpty() {
+		_ = json.Unmarshal([]byte(summaryRecord["summary"].String()), &state)
+	}
+	if state.Version != 1 {
+		state.CoveredTurns = 0
+	}
+	if state.CoveredTurns < 0 {
+		return nil, fmt.Errorf("invalid compaction checkpoint")
+	}
+	if err := g.DB().Model("conversation_turns").Ctx(ctx).Fields("role", "content").Where("conversation_id", id).OrderAsc("id").Limit(2147483647).Offset(state.CoveredTurns).Scan(&turns); err != nil {
+		return nil, err
+	}
 	if len(turns) == 0 && summaryRecord.IsEmpty() && len(compactionRows) == 0 {
 		return nil, nil
 	}
@@ -76,8 +81,7 @@ func (s *sqliteMemoryStore) Load(id string) (*memorySnapshot, error) {
 		MaxWindowSize: defaultStoredWindowSize,
 		UpdatedAt:     time.Now(),
 	}
-	for i := len(turns) - 1; i >= 0; i-- {
-		turn := turns[i]
+	for _, turn := range turns {
 		snapshot.Messages = append(snapshot.Messages, &schema.Message{
 			Role:    schema.RoleType(turn.Role),
 			Content: turn.Content,
@@ -251,7 +255,7 @@ func ensureConversation(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot
 }
 
 func upsertSummary(ctx context.Context, tx gdb.TX, snapshot *memorySnapshot) error {
-	summary := trimSessionStateText(redactText(snapshot.Summary), defaultContextSummaryMaxChars)
+	summary := persistedSummary(snapshot.Summary)
 	if strings.TrimSpace(summary) == "" {
 		return nil
 	}
@@ -290,7 +294,7 @@ func saveContextSnapshot(ctx context.Context, tx gdb.TX, snapshot *memorySnapsho
 	}
 	_, err = tx.Model("context_snapshots").Ctx(ctx).Data(g.Map{
 		"conversation_id":    snapshot.ID,
-		"summary":            trimSessionStateText(redactText(snapshot.Summary), defaultContextSummaryMaxChars),
+		"summary":            persistedSummary(snapshot.Summary),
 		"facts_json":         string(factsJSON),
 		"generation":         snapshot.Compaction.Generation,
 		"before_tokens":      snapshot.Compaction.BeforeTokens,

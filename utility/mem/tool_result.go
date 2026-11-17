@@ -63,6 +63,11 @@ func SaveToolResult(ctx context.Context, userID string, conversationID string, r
 	return saveToolResultByStorageID(ctx, scope.StorageID, result)
 }
 
+// SaveKnowledgeAudit uses the same tenant conversation scope as normal tool callbacks.
+func SaveKnowledgeAudit(ctx context.Context, principal MemoryPrincipal, conversationID, input, output string) error {
+	return SaveToolResult(ctx, principal.UserID, TenantConversationID(principal, conversationID), ToolResult{ToolName: "query_internal_docs.audit", InputJSON: input, OutputJSON: output, OutputSummary: "Original authorized documentation before model selection", Status: "audit_only"})
+}
+
 func loadRecentToolResults(ctx context.Context, conversationID string) (string, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
@@ -73,6 +78,7 @@ func loadRecentToolResults(ctx context.Context, conversationID string) (string, 
 	if err := g.DB().Model("tool_results").
 		Ctx(ctx).
 		Fields("tool_name", "output_summary", "status").
+		WhereNot("status", "audit_only").
 		Where("conversation_id", conversationID).
 		OrderDesc("id").
 		Limit(toolResultContextLimit).
@@ -254,6 +260,7 @@ func loadEvidenceRows(ctx context.Context, conversationID string, limit int) ([]
 	err := g.DB().Model("tool_results").
 		Ctx(ctx).
 		Fields("tool_name", "output", "status").
+		WhereNot("status", "audit_only").
 		Where("conversation_id", conversationID).
 		OrderDesc("id").
 		Limit(limit).

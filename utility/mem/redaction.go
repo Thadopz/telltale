@@ -1,6 +1,7 @@
 package mem
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"github.com/Thadopz/telltale/internal/ai/evidence"
 	"regexp"
@@ -8,6 +9,87 @@ import (
 )
 
 const RedactionVersion = 1
+
+// RedactToolPayload reuses persistence redaction before untrusted log text reaches a model.
+func RedactToolPayload(value any) any { return redactJSONValue("", value) }
+
+// RedactKnowledgePayload preserves validated document identifiers while redacting content.
+func RedactKnowledgePayload(value any) any {
+	docs, ok := value.([]any)
+	if !ok {
+		return RedactToolPayload(value)
+	}
+	for index, item := range docs {
+		doc, ok := item.(map[string]any)
+		if !ok {
+			docs[index] = RedactToolPayload(item)
+			continue
+		}
+		fields := RedactKnowledgeFields(map[string]any{"document_id": doc["id"], "metadata": doc["meta_data"]})
+		redacted := redactAnyMap(doc)
+		if id, ok := fields["document_id"].(string); ok && validKnowledgeHash(id) {
+			redacted["id"] = id
+		}
+		if metadata, ok := fields["metadata"].(map[string]any); ok {
+			redacted["meta_data"] = metadata
+		}
+		docs[index] = redacted
+	}
+	return docs
+}
+
+// RedactKnowledgeFields preserves typed document references, never free text or secrets.
+func RedactKnowledgeFields(fields map[string]any) map[string]any {
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return redactAnyMap(fields)
+	}
+	var copy map[string]any
+	if json.Unmarshal(encoded, &copy) != nil {
+		return redactAnyMap(fields)
+	}
+	refs := map[string]string{}
+	for _, key := range []string{"document_id"} {
+		if text, ok := copy[key].(string); ok && validKnowledgeHash(text) {
+			refs[key] = text
+		}
+	}
+	type group struct {
+		key    string
+		values map[string]string
+	}
+	var groups []group
+	for _, key := range []string{"metadata", "selection"} {
+		if values, ok := copy[key].(map[string]any); ok {
+			keep := map[string]string{}
+			for _, name := range []string{"_source_hash", "_chunk_hash", "goal_hash", "source_digest"} {
+				if text, ok := values[name].(string); ok && validKnowledgeHash(text) {
+					keep[name] = text
+				}
+			}
+			groups = append(groups, group{key, keep})
+		}
+	}
+	redacted := redactAnyMap(copy)
+	for key, value := range refs {
+		redacted[key] = value
+	}
+	for _, group := range groups {
+		values := redacted[group.key].(map[string]any)
+		for key, value := range group.values {
+			values[key] = value
+		}
+	}
+	return redacted
+}
+
+func validKnowledgeHash(text string) bool {
+	if len(text) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(text)
+	return err == nil
+}
 
 var (
 	persistedSecretKeyPattern = regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key|authorization|private[_-]?key|client[_-]?secret|access[_-]?key|dsn|connection[_-]?string)`)
@@ -42,7 +124,11 @@ func redactToolOutput(raw string) string {
 	for index := range env.Evidence.Observations {
 		env.Evidence.Observations[index].Subject.Fields = redactStringMap(env.Evidence.Observations[index].Subject.Fields)
 		env.Evidence.Observations[index].Scope.Fields = redactStringMap(env.Evidence.Observations[index].Scope.Fields)
-		env.Evidence.Observations[index].Fields = redactAnyMap(env.Evidence.Observations[index].Fields)
+		if env.Evidence.Observations[index].Kind == evidence.ObservationRunbookRule {
+			env.Evidence.Observations[index].Fields = RedactKnowledgeFields(env.Evidence.Observations[index].Fields)
+		} else {
+			env.Evidence.Observations[index].Fields = redactAnyMap(env.Evidence.Observations[index].Fields)
+		}
 		env.Evidence.Observations[index].Summary = redactText(env.Evidence.Observations[index].Summary)
 	}
 	return evidence.Marshal(env)

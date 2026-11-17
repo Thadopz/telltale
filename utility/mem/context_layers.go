@@ -2,13 +2,10 @@ package mem
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"github.com/Thadopz/telltale/internal/ai/runstate"
 	"strings"
-
-	"github.com/gogf/gf/v2/frame/g"
 )
-
-const durableMemoryContextLimit = 10
 
 type ContextLayers struct {
 	SessionState  string
@@ -20,11 +17,6 @@ type sessionStateRow struct {
 	Goal   string `json:"goal"`
 	Status string `json:"status"`
 	State  string `json:"state"`
-}
-
-type durableMemoryRow struct {
-	Kind    string `json:"kind"`
-	Content string `json:"content"`
 }
 
 func LoadContextLayers(ctx context.Context, userID string, conversationID string) (ContextLayers, error) {
@@ -64,24 +56,18 @@ func loadContextLayersForScope(ctx context.Context, principal MemoryPrincipal, s
 		return layers, nil
 	}
 
-	var memories []durableMemoryRow
-	err := g.DB().Model("durable_memories").
-		Ctx(ctx).
-		Fields("kind", "content").
-		Where("user_id", scope.UserID).
-		Where("status", "active").
-		OrderDesc("updated_at").
-		Limit(durableMemoryContextLimit).
-		Scan(&memories)
-	if err != nil {
-		return layers, err
-	}
-	layers.DurableMemory = formatDurableMemories(memories)
 	return layers, nil
 }
 
 func formatSessionState(state sessionStateRow) string {
 	var lines []string
+	var payload sessionStatePayload
+	if json.Unmarshal([]byte(state.State), &payload) == nil && payload.DiagnosticState != "" {
+		var diagnostic runstate.Diagnostic
+		if json.Unmarshal([]byte(payload.DiagnosticState), &diagnostic) == nil {
+			lines = append(lines, runstate.DiagnosticMemory(&diagnostic))
+		}
+	}
 	if strings.TrimSpace(state.Goal) != "" {
 		lines = append(lines, "Goal: "+strings.TrimSpace(state.Goal))
 	}
@@ -90,22 +76,6 @@ func formatSessionState(state sessionStateRow) string {
 	}
 	if strings.TrimSpace(state.State) != "" {
 		lines = append(lines, "State: "+strings.TrimSpace(state.State))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func formatDurableMemories(memories []durableMemoryRow) string {
-	lines := make([]string, 0, len(memories))
-	for _, memory := range memories {
-		content := strings.TrimSpace(memory.Content)
-		if content == "" {
-			continue
-		}
-		kind := strings.TrimSpace(memory.Kind)
-		if kind == "" {
-			kind = "memory"
-		}
-		lines = append(lines, fmt.Sprintf("- %s: %s", kind, content))
 	}
 	return strings.Join(lines, "\n")
 }
